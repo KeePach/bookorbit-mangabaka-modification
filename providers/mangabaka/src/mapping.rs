@@ -59,10 +59,13 @@ fn regex(pattern: &str) -> Regex {
     Regex::new(pattern).expect("valid pattern")
 }
 
-// "Berserk Vol. 3", "Berserk v03", "Berserk volume 3", "One Piece #3". A bare trailing number is
-// left alone, since it is as often part of a title ("Mob Psycho 100").
+// A title can end with either volume or chapter markers, or both. We strip them before the search
+// title is sent upstream, then keep a display label for the series heading.
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:(?-u:\b)(?:vol(?:ume)?|v)\.?\s*|#\s*)0*([0-9]{1,4}(?:\.[0-9]+)?)(?-u:\b)")
+    regex(r"(?i)(?:^|\s|[-:])(?:vol(?:ume)?|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|\s|[-:,])")
+});
+static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
+    regex(r"(?i)(?:^|\s|[-:])(?:chap(?:ter)?|ch)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|\s|[-:,])")
 });
 static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\]"));
 static TRAILING_JUNK: LazyLock<Regex> =
@@ -76,21 +79,66 @@ static MARKDOWN_EM: LazyLock<Regex> = LazyLock::new(|| regex(r"\*(.+?)\*"));
 static HARD_BREAK: LazyLock<Regex> = LazyLock::new(|| regex(r" {2,}\n"));
 static BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| regex(r"\n{3,}"));
 
-/// Takes a volume number off a search query: the title is what MangaBaka knows, the number is
-/// which book of it the file is.
-pub fn split_volume(query: &str) -> (String, String) {
-    let Some(captures) = VOLUME.captures(query) else {
-        return (query.to_string(), String::new());
-    };
-    let whole = captures.get(0).expect("whole match");
-    let rest = format!("{} {}", &query[..whole.start()], &query[whole.end()..]);
-    let rest = EMPTY_BRACKETS.replace_all(&rest, " ");
+fn strip_title_suffix(rest: &str) -> String {
+    let rest = EMPTY_BRACKETS.replace_all(rest, " ");
     let rest = SPACES.replace_all(&rest, " ");
-    let rest = TRAILING_JUNK.replace_all(rest.trim(), "").into_owned();
-    if rest.is_empty() {
-        return (query.to_string(), String::new());
+    TRAILING_JUNK
+        .replace_all(rest.trim(), "")
+        .trim()
+        .to_string()
+}
+
+fn trim_title_prefix(title: &str) -> String {
+    title
+        .trim()
+        .trim_matches(['-', '–', '—', ':'])
+        .trim()
+        .to_string()
+}
+
+/// Takes both the volume and chapter off a query when they are present, while keeping the title
+/// clean enough to search against MangaBaka. When both are present, the chapter is the stronger
+/// suffix and the volume remains as a fallback readout for the title.
+pub fn split_volume(query: &str) -> (String, String) {
+    let mut cleaned = query.trim().to_string();
+    let mut volume = String::new();
+    let mut chapter = String::new();
+
+    if let Some(captures) = VOLUME.captures(&cleaned) {
+        volume = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let whole = captures.get(0).expect("whole match");
+        cleaned = format!("{} {}", &cleaned[..whole.start()], &cleaned[whole.end()..]);
     }
-    (rest, captures[1].to_string())
+    if let Some(captures) = CHAPTER.captures(&cleaned) {
+        chapter = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let whole = captures.get(0).expect("whole match");
+        cleaned = format!("{} {}", &cleaned[..whole.start()], &cleaned[whole.end()..]);
+    }
+
+    let cleaned = trim_title_prefix(&strip_title_suffix(&cleaned));
+    let cleaned = if cleaned.is_empty() {
+        query.trim().to_string()
+    } else {
+        cleaned
+    };
+
+    let index = match (volume.as_str(), chapter.as_str()) {
+        ("", "") => String::new(),
+        (v, "") => format!("Vol. {v}"),
+        ("", c) => format!("Ch. {c}"),
+        (v, c) => format!("Vol. {v} Ch. {c}"),
+    };
+
+    (cleaned, index)
+}
+
+fn provider_volume(series_index: &str) -> &str {
+    series_index
+        .split(" Ch. ")
+        .next()
+        .and_then(|value| value.strip_prefix("Vol. "))
+        .unwrap_or(series_index)
+        .trim()
 }
 
 pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
@@ -108,13 +156,14 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
         p.kind.as_deref() == Some("English") && p.name.as_deref() == Some(publisher.as_str())
     });
     // The series' start says when volume 1 came out, not a later one.
-    let dated = volume.is_empty() || volume == "1";
+    let dated = volume.is_empty() || provider_volume(volume) == "1";
     let published_date = s
         .published
         .as_ref()
         .and_then(|published| published.start_date.clone())
         .filter(|date| dated && date.len() == "2006-01-02".len())
         .unwrap_or_default();
+    let provider_volume = provider_volume(volume);
     BookMetadata {
         // Comics unless MangaBaka files it as a novel, so a client can tell a light novel from its
         // manga of the same name.
@@ -124,15 +173,15 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
             "comic"
         },
         // A volume's id carries its number, so looking it up again answers the same book.
-        provider_id: if volume.is_empty() {
+        provider_id: if provider_volume.is_empty() {
             s.id.to_string()
         } else {
-            format!("{}v{volume}", s.id)
+            format!("{}v{provider_volume}", s.id)
         },
         title: if volume.is_empty() {
             series_title.clone()
         } else {
-            format!("{series_title}, Vol. {volume}")
+            format!("{series_title} - {volume}")
         },
         series: vec![SeriesEntry {
             series: series_title,
@@ -168,8 +217,8 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
     }
 }
 
-/// The official English name, which is what an English edition's cover and a file name carry.
-/// MangaBaka's own `title` is sometimes a fan or older name ("FULL METAL ALCHEMIST").
+/// Prefer any readable English title, even if MangaBaka did not label it as official. A title may
+/// still be the best English display name even when it is only an accepted alias.
 fn english_title(s: &Series) -> String {
     let english: Vec<&Title> = s
         .titles
@@ -179,11 +228,16 @@ fn english_title(s: &Series) -> String {
             t.language.as_deref() == Some("en")
                 && t.title.as_deref().is_some_and(|t| !t.trim().is_empty())
         })
-        .filter(|t| t.traits.iter().flatten().any(|tr| tr == "official"))
         .collect();
+
     english
         .iter()
         .find(|t| t.is_primary == Some(true))
+        .or_else(|| {
+            english
+                .iter()
+                .find(|t| t.traits.iter().flatten().any(|tr| tr == "official"))
+        })
         .or_else(|| english.first())
         .and_then(|t| t.title.clone())
         .or_else(|| s.title.clone().filter(|t| !t.trim().is_empty()))
@@ -402,13 +456,16 @@ mod tests {
     #[test]
     fn splits_a_volume_off_the_query() {
         let cases = [
-            ("Berserk Vol. 3", "Berserk", "3"),
-            ("Berserk, Vol. 03", "Berserk", "3"),
-            ("Berserk v12", "Berserk", "12"),
-            ("Berserk volume 41", "Berserk", "41"),
-            ("One Piece #5", "One Piece", "5"),
-            ("Berserk (Vol 2)", "Berserk", "2"),
-            ("Chainsaw Man Vol. 10.5", "Chainsaw Man", "10.5"),
+            ("Berserk Vol. 3", "Berserk", "Vol. 3"),
+            ("Berserk, Vol. 03", "Berserk", "Vol. 3"),
+            ("Berserk v12", "Berserk", "Vol. 12"),
+            ("Berserk volume 41", "Berserk", "Vol. 41"),
+            ("One Piece #5", "One Piece", "Vol. 5"),
+            ("Berserk (Vol 2)", "Berserk", "Vol. 2"),
+            ("Berserk - Vol. 3 Ch. 7", "Berserk", "Vol. 3 Ch. 7"),
+            ("Berserk Vol. 3 ch. 7", "Berserk", "Vol. 3 Ch. 7"),
+            ("Berserk - Ch. 7", "Berserk", "Ch. 7"),
+            ("Chainsaw Man Vol. 10.5", "Chainsaw Man", "Vol. 10.5"),
             ("Mob Psycho 100", "Mob Psycho 100", ""),
             ("Revolutionary Girl Utena", "Revolutionary Girl Utena", ""),
             ("Vol. 3", "Vol. 3", ""),
@@ -424,14 +481,14 @@ mod tests {
 
     #[test]
     fn maps_a_series() {
-        let book = map_series(&load_series(SERIES_1692), "3");
+        let book = map_series(&load_series(SERIES_1692), "Vol. 3");
         assert_eq!(
             (
                 book.provider_id.as_str(),
                 book.title.as_str(),
                 book.media_type
             ),
-            ("1692v3", "Berserk, Vol. 3", "comic")
+            ("1692v3", "Berserk - Vol. 3", "comic")
         );
         assert_eq!(book.authors, ["Kentaro Miura", "Kouji Mori"]);
         assert_eq!(book.publisher, "Dark Horse Manga");
@@ -449,7 +506,7 @@ mod tests {
             book.series,
             [SeriesEntry {
                 series: "Berserk".into(),
-                sequence: "3".into()
+                sequence: "Vol. 3".into()
             }]
         );
         assert!(!book.cover.is_empty());
@@ -465,7 +522,7 @@ mod tests {
     #[test]
     fn dates_the_first_volume_and_the_series_itself() {
         let series = load_series(SERIES_1692);
-        for volume in ["", "1"] {
+        for volume in ["", "Vol. 1"] {
             let book = map_series(&series, volume);
             assert_eq!(
                 (book.published_year.as_str(), book.published_date.as_str()),
@@ -516,6 +573,29 @@ mod tests {
             ..Series::default()
         };
         assert_eq!(map_series(&series, "").title, "Fullmetal Alchemist");
+    }
+
+    #[test]
+    fn prefers_a_readable_english_title_even_without_official_marker() {
+        let series = Series {
+            title: Some("THE FIRST WITCH".into()),
+            titles: Some(vec![
+                Title {
+                    language: Some("en".into()),
+                    title: Some("The First Witch".into()),
+                    traits: Some(vec![]),
+                    is_primary: Some(false),
+                },
+                Title {
+                    language: Some("ja".into()),
+                    title: Some("はじまりの魔女".into()),
+                    traits: Some(vec![]),
+                    is_primary: Some(false),
+                },
+            ]),
+            ..Series::default()
+        };
+        assert_eq!(map_series(&series, "").title, "The First Witch");
     }
 
     #[test]
