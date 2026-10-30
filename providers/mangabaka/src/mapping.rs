@@ -59,13 +59,13 @@ fn regex(pattern: &str) -> Regex {
     Regex::new(pattern).expect("valid pattern")
 }
 
-// "Berserk Vol. 3", "Berserk v03", "Berserk volume 3", "One Piece #3".
-// We also support chapter suffixes like "Ch. 7".
+// Accept common volume and chapter aliases such as "Vol.", "Volume", "V", "VL", "Ch",
+// "Chapter", "Chptr", and "C#".
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume)?|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|[\s\-:,])")
+    regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|[\s\-:,])")
 });
 static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:])(?:chap(?:ter)?|ch)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|[\s\-:,])")
+    regex(r"(?i)(?:^|[\s\-:])(?:chap(?:ter)?|chptr|ch|c#)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|[\s\-:,])")
 });
 static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\]"));
 static TRAILING_JUNK: LazyLock<Regex> =
@@ -453,11 +453,14 @@ mod tests {
             ("Berserk, Vol. 03", "Berserk", "Vol. 3"),
             ("Berserk v12", "Berserk", "Vol. 12"),
             ("Berserk volume 41", "Berserk", "Vol. 41"),
+            ("Berserk vl 7", "Berserk", "Vol. 7"),
             ("One Piece #5", "One Piece", "Vol. 5"),
             ("Berserk (Vol 2)", "Berserk", "Vol. 2"),
             ("Berserk - Vol. 3 Ch. 7", "Berserk", "Vol. 3 Ch. 7"),
             ("Berserk Vol. 3 ch. 7", "Berserk", "Vol. 3 Ch. 7"),
             ("Berserk - Ch. 7", "Berserk", "Ch. 7"),
+            ("Berserk - C# 7", "Berserk", "Ch. 7"),
+            ("Berserk chptr 7", "Berserk", "Ch. 7"),
             ("Chainsaw Man Vol. 10.5", "Chainsaw Man", "Vol. 10.5"),
             ("Mob Psycho 100", "Mob Psycho 100", ""),
             ("Revolutionary Girl Utena", "Revolutionary Girl Utena", ""),
