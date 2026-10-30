@@ -60,12 +60,13 @@ fn regex(pattern: &str) -> Regex {
 }
 
 // Accept common volume and chapter aliases such as "Vol.", "Volume", "V", "VL", "Ch",
-// "Chapter", "Chptr", and "C#".
+// "Chapter", "Chptr", and "C#". Rust's regex engine does not support look-ahead, so we use
+// a non-lookaround end condition instead.
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|[\s\-:,])")
+    regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
 });
 static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:])(?:chap(?:ter)?|chptr|ch|c#)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|[\s\-:,])")
+    regex(r"(?i)(?:^|[\s\-:])(?:chap(?:ter)?|chptr|ch|c#)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
 });
 static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\]"));
 static TRAILING_JUNK: LazyLock<Regex> =
