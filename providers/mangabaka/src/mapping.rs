@@ -60,13 +60,13 @@ fn regex(pattern: &str) -> Regex {
 }
 
 // Accept common volume and chapter aliases such as "Vol.", "Volume", "V", "VL", "Ch",
-// "Chapter", "Chptr", and "C#". Rust's regex engine does not support look-ahead, so we use
-// a non-lookaround end condition instead.
+// "Chapter", "Chptr", and "C#". Allow common typos such as "volum" and "chaptr" as well.
+// Rust's regex engine does not support look-ahead, so we use a non-lookaround end condition.
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
+    regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume|um)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
 });
 static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:])(?:chap(?:ter)?|chptr|ch|c#)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
+    regex(r"(?i)(?:^|[\s\-:])(?:chap(?:ter|tr)?|chptr|ch|c#)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
 });
 static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\]"));
 static TRAILING_JUNK: LazyLock<Regex> =
@@ -112,6 +112,9 @@ fn cleanup_title_bits(title: &str) -> String {
 /// Takes both the volume and chapter off a query when they are present, while keeping the title
 /// clean enough to search against MangaBaka. When both are present, the chapter is the stronger
 /// suffix and the volume remains as a fallback readout for the title.
+/// Takes both the volume and chapter off a query when they are present, while keeping the title
+/// clean enough to search against MangaBaka. When both are present, the chapter is the stronger
+/// suffix and the volume remains as a fallback readout for the title.
 pub fn split_volume(query: &str) -> (String, String) {
     let mut cleaned = query.trim().to_string();
     let mut volume = String::new();
@@ -120,24 +123,24 @@ pub fn split_volume(query: &str) -> (String, String) {
     if let Some(captures) = VOLUME.captures(&cleaned) {
         volume = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
         let whole = captures.get(0).expect("whole match");
-        let before = cleaned[..whole.start()].trim();
-        let after = cleaned[whole.end()..].trim();
+        let before = cleaned[..whole.start()].trim().to_string();
+        let after = cleaned[whole.end()..].trim().to_string();
         cleaned = match (before.is_empty(), after.is_empty()) {
             (true, true) => String::new(),
-            (true, false) => after.to_string(),
-            (false, true) => before.to_string(),
+            (true, false) => after,
+            (false, true) => before,
             (false, false) => format!("{before} {after}"),
         };
     }
     if let Some(captures) = CHAPTER.captures(&cleaned) {
         chapter = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
         let whole = captures.get(0).expect("whole match");
-        let before = cleaned[..whole.start()].trim();
-        let after = cleaned[whole.end()..].trim();
+        let before = cleaned[..whole.start()].trim().to_string();
+        let after = cleaned[whole.end()..].trim().to_string();
         cleaned = match (before.is_empty(), after.is_empty()) {
             (true, true) => String::new(),
-            (true, false) => after.to_string(),
-            (false, true) => before.to_string(),
+            (true, false) => after,
+            (false, true) => before,
             (false, false) => format!("{before} {after}"),
         };
     }
