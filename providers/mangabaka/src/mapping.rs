@@ -59,13 +59,13 @@ fn regex(pattern: &str) -> Regex {
     Regex::new(pattern).expect("valid pattern")
 }
 
-// A title can end with either volume or chapter markers, or both. We strip them before the search
-// title is sent upstream, then keep a display label for the series heading.
+// "Berserk Vol. 3", "Berserk v03", "Berserk volume 3", "One Piece #3".
+// We also support chapter suffixes like "Ch. 7".
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|\s|[-:])(?:vol(?:ume)?|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|\s|[-:,])")
+    regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume)?|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|[\s\-:,])")
 });
 static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|\s|[-:])(?:chap(?:ter)?|ch)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|\s|[-:,])")
+    regex(r"(?i)(?:^|[\s\-:])(?:chap(?:ter)?|ch)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?=$|[\s\-:,])")
 });
 static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\]"));
 static TRAILING_JUNK: LazyLock<Regex> =
@@ -116,20 +116,18 @@ pub fn split_volume(query: &str) -> (String, String) {
     }
 
     let cleaned = trim_title_prefix(&strip_title_suffix(&cleaned));
-    let cleaned = if cleaned.is_empty() {
-        query.trim().to_string()
+    let normalized = match (volume.is_empty(), chapter.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("Vol. {volume}"),
+        (true, false) => format!("Ch. {chapter}"),
+        (false, false) => format!("Vol. {volume} Ch. {chapter}"),
+    };
+
+    if cleaned.is_empty() {
+        (query.trim().to_string(), normalized)
     } else {
-        cleaned
-    };
-
-    let index = match (volume.as_str(), chapter.as_str()) {
-        ("", "") => String::new(),
-        (v, "") => format!("Vol. {v}"),
-        ("", c) => format!("Ch. {c}"),
-        (v, c) => format!("Vol. {v} Ch. {c}"),
-    };
-
-    (cleaned, index)
+        (cleaned, normalized)
+    }
 }
 
 fn provider_volume(series_index: &str) -> &str {
@@ -165,14 +163,11 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
         .unwrap_or_default();
     let provider_volume = provider_volume(volume);
     BookMetadata {
-        // Comics unless MangaBaka files it as a novel, so a client can tell a light novel from its
-        // manga of the same name.
         media_type: if s.kind.as_deref() == Some("novel") {
             "book"
         } else {
             "comic"
         },
-        // A volume's id carries its number, so looking it up again answers the same book.
         provider_id: if provider_volume.is_empty() {
             s.id.to_string()
         } else {
@@ -208,7 +203,6 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
         published_date,
         cover_width: raw_cover.and_then(|raw| raw.width).unwrap_or(0),
         cover_height: raw_cover.and_then(|raw| raw.height).unwrap_or(0),
-        // MangaBaka rates out of 100; the spec rates out of 5.
         rating: s
             .rating
             .filter(|rating| *rating > 0.0)
@@ -257,7 +251,6 @@ pub fn tidy_title(title: &str) -> String {
         .replace_all(&title.replace('×', " x "), " ")
         .trim()
         .to_string();
-    // A one-letter word ("x") says nothing about whether the rest is shouted.
     let letters: Vec<char> = title
         .split(' ')
         .filter(|word| word.chars().filter(|c| c.is_alphabetic()).count() > 1)
@@ -492,7 +485,6 @@ mod tests {
         );
         assert_eq!(book.authors, ["Kentaro Miura", "Kouji Mori"]);
         assert_eq!(book.publisher, "Dark Horse Manga");
-        // A later volume keeps no date: the series' start is volume 1's.
         assert_eq!(
             (
                 book.published_year.as_str(),
@@ -604,10 +596,7 @@ mod tests {
             ("ONE PIECE", "One Piece"),
             ("SPY×FAMILY", "Spy x Family"),
             ("ATTACK ON TITAN", "Attack on Titan"),
-            (
-                "Frieren: Beyond Journey’s End",
-                "Frieren: Beyond Journey’s End",
-            ),
+            ("Frieren: Beyond Journey’s End", "Frieren: Beyond Journey’s End"),
             ("GTO", "GTO"),
         ] {
             assert_eq!(tidy_title(raw), tidy, "{raw}");
