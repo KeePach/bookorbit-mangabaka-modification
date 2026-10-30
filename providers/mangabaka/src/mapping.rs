@@ -60,7 +60,7 @@ fn regex(pattern: &str) -> Regex {
 }
 
 // Accept common volume and chapter aliases such as "Vol.", "Volume", "V", "VL", "Ch",
-// "Chapter", "Chptr", and "C#". Allow common typos such as "volum" and "chaptr" as well.
+// "Chapter", "Chptr", and "C#". Allow common typos like "volum" and "chaptr" too.
 // Rust's regex engine does not support look-ahead, so we use a non-lookaround end condition.
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
     regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume|um)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
@@ -102,16 +102,23 @@ fn cleanup_title_bits(title: &str) -> String {
     if title.is_empty() {
         return String::new();
     }
+
     let mut bits = title.split_whitespace().collect::<Vec<_>>();
-    while !bits.is_empty() && matches!(bits.last(), Some("vol" | "volume" | "ch" | "chapter" | "c#" | "v" | "vl")) {
+    while !bits.is_empty()
+        && matches!(
+            bits.last(),
+            Some(value)
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "vol" | "volume" | "ch" | "chapter" | "c#" | "v" | "vl"
+                )
+        )
+    {
         bits.pop();
     }
     bits.join(" ")
 }
 
-/// Takes both the volume and chapter off a query when they are present, while keeping the title
-/// clean enough to search against MangaBaka. When both are present, the chapter is the stronger
-/// suffix and the volume remains as a fallback readout for the title.
 /// Takes both the volume and chapter off a query when they are present, while keeping the title
 /// clean enough to search against MangaBaka. When both are present, the chapter is the stronger
 /// suffix and the volume remains as a fallback readout for the title.
@@ -132,6 +139,7 @@ pub fn split_volume(query: &str) -> (String, String) {
             (false, false) => format!("{before} {after}"),
         };
     }
+
     if let Some(captures) = CHAPTER.captures(&cleaned) {
         chapter = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
         let whole = captures.get(0).expect("whole match");
