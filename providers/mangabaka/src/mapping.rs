@@ -97,6 +97,18 @@ fn trim_title_prefix(title: &str) -> String {
         .to_string()
 }
 
+fn cleanup_title_bits(title: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        return String::new();
+    }
+    let mut bits = title.split_whitespace().collect::<Vec<_>>();
+    while !bits.is_empty() && matches!(bits.last(), Some("vol" | "volume" | "ch" | "chapter" | "c#" | "v" | "vl")) {
+        bits.pop();
+    }
+    bits.join(" ")
+}
+
 /// Takes both the volume and chapter off a query when they are present, while keeping the title
 /// clean enough to search against MangaBaka. When both are present, the chapter is the stronger
 /// suffix and the volume remains as a fallback readout for the title.
@@ -108,12 +120,26 @@ pub fn split_volume(query: &str) -> (String, String) {
     if let Some(captures) = VOLUME.captures(&cleaned) {
         volume = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
         let whole = captures.get(0).expect("whole match");
-        cleaned = format!("{} {}", &cleaned[..whole.start()], &cleaned[whole.end()..]);
+        let before = cleaned[..whole.start()].trim();
+        let after = cleaned[whole.end()..].trim();
+        cleaned = match (before.is_empty(), after.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => after.to_string(),
+            (false, true) => before.to_string(),
+            (false, false) => format!("{before} {after}"),
+        };
     }
     if let Some(captures) = CHAPTER.captures(&cleaned) {
         chapter = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
         let whole = captures.get(0).expect("whole match");
-        cleaned = format!("{} {}", &cleaned[..whole.start()], &cleaned[whole.end()..]);
+        let before = cleaned[..whole.start()].trim();
+        let after = cleaned[whole.end()..].trim();
+        cleaned = match (before.is_empty(), after.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => after.to_string(),
+            (false, true) => before.to_string(),
+            (false, false) => format!("{before} {after}"),
+        };
     }
 
     let cleaned = trim_title_prefix(&strip_title_suffix(&cleaned));
@@ -131,13 +157,27 @@ pub fn split_volume(query: &str) -> (String, String) {
     }
 }
 
-fn provider_volume(series_index: &str) -> &str {
-    series_index
-        .split(" Ch. ")
-        .next()
-        .and_then(|value| value.strip_prefix("Vol. "))
-        .unwrap_or(series_index)
-        .trim()
+fn series_index_numbers(series_index: &str) -> (String, String) {
+    let volume = VOLUME
+        .captures(series_index)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_default();
+    let chapter = CHAPTER
+        .captures(series_index)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_default();
+    (volume, chapter)
+}
+
+fn provider_index(series_index: &str) -> String {
+    let (volume, chapter) = series_index_numbers(series_index);
+    if !chapter.is_empty() {
+        chapter
+    } else {
+        volume
+    }
 }
 
 pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
@@ -154,25 +194,26 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
     let english = publishers.iter().any(|p| {
         p.kind.as_deref() == Some("English") && p.name.as_deref() == Some(publisher.as_str())
     });
+    let volume_number = series_index_numbers(volume).0;
     // The series' start says when volume 1 came out, not a later one.
-    let dated = volume.is_empty() || provider_volume(volume) == "1";
+    let dated = volume.is_empty() || volume_number == "1";
     let published_date = s
         .published
         .as_ref()
         .and_then(|published| published.start_date.clone())
         .filter(|date| dated && date.len() == "2006-01-02".len())
         .unwrap_or_default();
-    let provider_volume = provider_volume(volume);
+    let provider_index = provider_index(volume);
     BookMetadata {
         media_type: if s.kind.as_deref() == Some("novel") {
             "book"
         } else {
             "comic"
         },
-        provider_id: if provider_volume.is_empty() {
+        provider_id: if provider_index.is_empty() {
             s.id.to_string()
         } else {
-            format!("{}v{provider_volume}", s.id)
+            format!("{}v{provider_index}", s.id)
         },
         title: if volume.is_empty() {
             series_title.clone()
@@ -466,6 +507,9 @@ mod tests {
             ("Mob Psycho 100", "Mob Psycho 100", ""),
             ("Revolutionary Girl Utena", "Revolutionary Girl Utena", ""),
             ("Vol. 3", "Vol. 3", ""),
+            ("Title Vol 2 Ch 11", "Title", "Vol. 2 Ch. 11"),
+            ("Title Ch 11", "Title", "Ch. 11"),
+            ("Title Vol 2", "Title", "Vol. 2"),
         ];
         for (query, title, volume) in cases {
             assert_eq!(
@@ -513,6 +557,13 @@ mod tests {
             Some("Award Winning")
         );
         assert_eq!(book.url, "https://mangabaka.org/manga/1692/BERSERK");
+    }
+
+    #[test]
+    fn prefers_the_chapter_in_provider_ids_when_both_are_present() {
+        let book = map_series(&load_series(SERIES_1692), "Vol. 2 Ch. 11");
+        assert_eq!(book.provider_id, "1692v11");
+        assert_eq!(book.title, "Berserk - Vol. 2 Ch. 11");
     }
 
     #[test]
