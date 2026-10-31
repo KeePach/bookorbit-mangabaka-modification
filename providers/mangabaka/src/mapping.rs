@@ -63,10 +63,10 @@ fn regex(pattern: &str) -> Regex {
 // "Chapter", "Chptr", and "C#". Allow common typos like "volum" and "chaptr" too.
 // Rust's regex engine does not support look-ahead, so we use a non-lookaround end condition.
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:])(?:vol(?:ume|um)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
+    regex(r"(?i)(?:^|[\s\-:(\[_])(?:vol(?:ume|um)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,)\](\[_])")
 });
 static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:])(?:chap(?:ter|tr)?|chptr|ch|c#)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,])")
+    regex(r"(?i)(?:^|[\s\-:(\[_])(?:chap(?:ter|tr)?|chptr|ch|c#)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,)\](\[_])")
 });
 static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\]"));
 static TRAILING_JUNK: LazyLock<Regex> =
@@ -119,39 +119,65 @@ fn cleanup_title_bits(title: &str) -> String {
     bits.join(" ")
 }
 
-/// Takes both the volume and chapter off a query when they are present, while keeping the title
-/// clean enough to search against MangaBaka. When both are present, the chapter is the stronger
-/// suffix and the volume remains as a fallback readout for the title.
+/// "0006" reads as "6" and "12.50" as "12.5": leading zeros and meaningless trailing decimal
+/// zeros go, so the same chapter always produces the same number.
+fn normalize_number(raw: &str) -> String {
+    let (whole, fraction) = raw.split_once('.').unwrap_or((raw, ""));
+    let whole = whole.trim_start_matches('0');
+    let whole = if whole.is_empty() { "0" } else { whole };
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        whole.to_string()
+    } else {
+        format!("{whole}.{fraction}")
+    }
+}
+
+/// Cuts the first match of `pattern` out of `text`, joining what was on either side.
+fn remove_match(text: &str, pattern: &Regex) -> String {
+    let Some(whole) = pattern.find(text) else {
+        return text.to_string();
+    };
+    let before = text[..whole.start()].trim();
+    let after = text[whole.end()..].trim();
+    match (before.is_empty(), after.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => after.to_string(),
+        (false, true) => before.to_string(),
+        (false, false) => format!("{before} {after}"),
+    }
+}
+
+/// Takes the volume and chapter off a query, keeping the title clean enough to search against
+/// MangaBaka. Numbers are normalized ("Ch.0006" is "Ch. 6"). When the title comes first, the
+/// first volume/chapter marker ends it: whatever follows (the chapter's own name, the author,
+/// the language, the scanlation group) is not part of the series name and would only make the
+/// search come back empty. When the marker leads ("Vol. 3 Berserk"), the rest is the title.
 pub fn split_volume(query: &str) -> (String, String) {
-    let mut cleaned = query.trim().to_string();
-    let mut volume = String::new();
-    let mut chapter = String::new();
+    let query = query.trim();
+    let volume_match = VOLUME.captures(query);
+    let chapter_match = CHAPTER.captures(query);
+    let number = |found: &Option<regex::Captures>| {
+        found
+            .as_ref()
+            .and_then(|captures| captures.get(1))
+            .map(|value| normalize_number(value.as_str()))
+            .unwrap_or_default()
+    };
+    let volume = number(&volume_match);
+    let chapter = number(&chapter_match);
 
-    if let Some(captures) = VOLUME.captures(&cleaned) {
-        volume = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let whole = captures.get(0).expect("whole match");
-        let before = cleaned[..whole.start()].trim().to_string();
-        let after = cleaned[whole.end()..].trim().to_string();
-        cleaned = match (before.is_empty(), after.is_empty()) {
-            (true, true) => String::new(),
-            (true, false) => after,
-            (false, true) => before,
-            (false, false) => format!("{before} {after}"),
-        };
-    }
-
-    if let Some(captures) = CHAPTER.captures(&cleaned) {
-        chapter = captures.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let whole = captures.get(0).expect("whole match");
-        let before = cleaned[..whole.start()].trim().to_string();
-        let after = cleaned[whole.end()..].trim().to_string();
-        cleaned = match (before.is_empty(), after.is_empty()) {
-            (true, true) => String::new(),
-            (true, false) => after,
-            (false, true) => before,
-            (false, false) => format!("{before} {after}"),
-        };
-    }
+    let first_marker = [&volume_match, &chapter_match]
+        .into_iter()
+        .flatten()
+        .filter_map(|captures| captures.get(0))
+        .map(|whole| whole.start())
+        .min();
+    let cleaned = match first_marker {
+        Some(start) if !query[..start].trim().is_empty() => query[..start].trim().to_string(),
+        Some(_) => remove_match(&remove_match(query, &VOLUME), &CHAPTER),
+        None => query.to_string(),
+    };
 
     let cleaned = trim_title_prefix(&strip_title_suffix(&cleaned));
     let normalized = match (volume.is_empty(), chapter.is_empty()) {
@@ -162,7 +188,7 @@ pub fn split_volume(query: &str) -> (String, String) {
     };
 
     if cleaned.is_empty() {
-        (query.trim().to_string(), normalized)
+        (query.to_string(), normalized)
     } else {
         (cleaned, normalized)
     }
@@ -172,12 +198,12 @@ fn series_index_numbers(series_index: &str) -> (String, String) {
     let volume = VOLUME
         .captures(series_index)
         .and_then(|captures| captures.get(1))
-        .map(|value| value.as_str().to_string())
+        .map(|value| normalize_number(value.as_str()))
         .unwrap_or_default();
     let chapter = CHAPTER
         .captures(series_index)
         .and_then(|captures| captures.get(1))
-        .map(|value| value.as_str().to_string())
+        .map(|value| normalize_number(value.as_str()))
         .unwrap_or_default();
     (volume, chapter)
 }
@@ -523,6 +549,14 @@ mod tests {
             ("Title Vol 2 Ch 11", "Title", "Vol. 2 Ch. 11"),
             ("Title Ch 11", "Title", "Ch. 11"),
             ("Title Vol 2", "Title", "Vol. 2"),
+            (
+                "The Anthology of Elder Sisterly Mischieves - Ch.0006 - Kasumi-neechan Amaecha Dame!! - Haseyoshi Eria (en) [anonymous]",
+                "The Anthology of Elder Sisterly Mischieves",
+                "Ch. 6",
+            ),
+            ("Foo - Ch.0012.50 - Bar", "Foo", "Ch. 12.5"),
+            ("Foo - Vol.01 - Bar (en)", "Foo", "Vol. 1"),
+            ("Vol. 3 Berserk", "Berserk", "Vol. 3"),
         ];
         for (query, title, volume) in cases {
             assert_eq!(
