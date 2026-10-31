@@ -42,6 +42,10 @@ pub struct BookMetadata {
     pub rating: Option<f64>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub url: String,
+    /// What BookOrbit compares the searched title against, when one of the series' other names
+    /// fits the query better than the English `title` does. Left out otherwise.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub display_title: String,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -293,6 +297,42 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
             .filter(|rating| *rating > 0.0)
             .map(|rating| (rating.min(100.0) / 20.0 * 100.0).round() / 100.0),
         url: s.canonical_url.clone().unwrap_or_default(),
+        display_title: String::new(),
+    }
+}
+
+/// The series name that best matches what was searched, written like the title ("Name - Ch. 10"),
+/// or nothing when the English title is already the best match. BookOrbit drops a result whose
+/// title shares too little with the query, so a romanized or native query would lose a series
+/// whose English name it never uses. `title` stays English; this is only what gets compared.
+pub fn display_title(s: &Series, query: &str, volume: &str) -> String {
+    let wanted: HashSet<String> = title_words(query)
+        .into_iter()
+        .filter(|word| !SMALL_WORDS.contains(&word.as_str()))
+        .collect();
+    let overlap = |name: &str| {
+        title_words(name)
+            .into_iter()
+            .filter(|word| wanted.contains(word))
+            .collect::<HashSet<String>>()
+            .len()
+    };
+    let english = tidy_title(&english_title(s));
+    let mut best = english.clone();
+    let mut best_overlap = overlap(&english);
+    for name in all_titles(s) {
+        let name_overlap = overlap(name);
+        if name_overlap > best_overlap {
+            best = tidy_title(name);
+            best_overlap = name_overlap;
+        }
+    }
+    if best == english {
+        String::new()
+    } else if volume.is_empty() {
+        best
+    } else {
+        format!("{best} - {volume}")
     }
 }
 
@@ -653,6 +693,30 @@ mod tests {
         let book = map_series(&load_series(SERIES_1692), "Vol. 2 Ch. 11");
         assert_eq!(book.provider_id, "1692v11");
         assert_eq!(book.title, "Berserk - Vol. 2 Ch. 11");
+    }
+
+    #[test]
+    fn display_title_is_the_name_the_query_used() {
+        let series = Series {
+            title: Some("A Gamer Is Going to Live a Harem Life in Another World".into()),
+            romanized_title: Some(
+                "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu".into(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            display_title(
+                &series,
+                "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu the Comic",
+                "Ch. 10"
+            ),
+            "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu - Ch. 10"
+        );
+        // An English query already matches the English title: nothing to add.
+        assert_eq!(
+            display_title(&series, "A Gamer Is Going to Live a Harem Life in Another World", "Ch. 10"),
+            ""
+        );
     }
 
     #[test]
