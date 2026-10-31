@@ -1,27 +1,52 @@
-# MangaBaka metadata provider
+# MangaBaka provider for BookOrbit (modified fork)
 
-BookOrbit metadata from [MangaBaka](https://mangabaka.org), the manga, manhwa, manhua and light
-novel database that merges AniList, MyAnimeList, MangaUpdates, Kitsu, Anime-Planet and Shikimori
-(BookOrbit issue #580). It runs beside BookOrbit as a small container.
+A fork of the official MangaBaka metadata provider for [BookOrbit](https://github.com/bookorbit/bookorbit),
+tuned for file names that carry chapter numbers, chapter names, or a romanized (non-English) title.
+Titles and series names are always returned in English.
 
-Rust: axum, tokio, reqwest with rustls, serde and regex. The image is a static musl binary on
-`scratch`; rustls carries its own root certificates, so there is nothing else in it.
+## What's changed
 
-## Run
+- **Title cut at the chapter/volume.** Everything after the first `Vol.`/`Ch.` marker (chapter name,
+  author, language, scanlation group) is dropped from the search query, so
+  `Series - Ch.0006 - Chapter Name - Author (en) [group]` searches for `Series`.
+- **Series index = chapter, else volume, else nothing.** `Vol. 2 Ch. 8` gives `8`, `Vol. 2` gives `2`,
+  neither gives an empty index. The full `Vol. 2 Ch. 8` label stays in the title only.
+- **Number cleanup.** Leading zeros go (`Ch.0006` becomes `6`), and so do meaningless trailing decimal
+  zeros (`12.50` becomes `12.5`).
+- **Wider marker detection.** `(`, `[` and `_` around the number are accepted (`Series (Vol 2)`).
+- **Shorter retries.** A search that finds nothing is retried: without a trailing edition word
+  (`the Comic`, `Manga`, `(Light Novel)`), then with the first half of the title.
+- **Better ordering.** Results are ordered by author match, exact name, then most shared words.
+- **`displayTitle`.** When another name of the series (romanized or native) fits the query better than the
+  English title, it is sent as `displayTitle`. `title` and the series stay English. This needs a BookOrbit
+  build that reads `displayTitle` (see the BookOrbit fork below); other builds ignore it.
+- **Title language. The returned title and series name are always English, whatever language the search used (a Japanese search does not return a Japanese title). With no English name, it falls back to MangaBaka’s main title, then the romanized title.
 
-Beside BookOrbit, on the same Docker network:
+## Use it
+
+In your BookOrbit `docker-compose.yml`:
 
 ```yaml
-services:
   mangabaka:
-    image: ghcr.io/bookorbit/mangabaka-provider:0.1.0
+    build:
+      context: https://github.com/KeePach/bookorbit-mangabaka-modification.git#main:providers/mangabaka
+      dockerfile: Dockerfile
+    image: mangabaka-provider:local
     restart: unless-stopped
 ```
 
-Then add `http://mangabaka:8080` in BookOrbit under **Settings > Metadata > Providers > External
-providers**; the [BookOrbit guide](https://github.com/bookorbit/bookorbit/blob/main/docs/METADATA_PROVIDERS.md)
-has the steps. To build it yourself: `docker build -t mangabaka-provider .`, or with a Rust toolchain,
-`cargo run --release`.
+Then `docker compose up -d --build mangabaka`, and add the provider in BookOrbit with the URL
+`http://mangabaka:8080`.
+
+## Working on it
+
+- Bump `VERSION` in `src/main.rs` whenever you change behavior. BookOrbit caches answers per provider
+  version, so an old empty answer keeps being served until the version changes.
+- Keep `Cargo.toml` and `Cargo.lock` at the same package version; the Dockerfile builds with `--locked`.
+- Use BookOrbit's **Search fresh** after a change, to skip its cache.
+
+Companion fork: [KeePach/bookorbit](https://github.com/KeePach/bookorbit). (only modified how it compare the title so it does not drop the match)
+
 
 | Variable | Default | |
 |---|---|---|
@@ -48,10 +73,6 @@ MangaBaka throttles or the queue is long, `502` when MangaBaka fails.
 
 ## Mapping
 
-- **One record per series.** MangaBaka describes a series, not a volume. A volume in the query
-  ("Berserk Vol. 3", "Berserk v03", "One Piece #5") is taken off before searching and returned as
-  the series position, so a library of volumes gets the right number on each. A bare trailing
-  number is left in the title, since it is as often part of one ("Mob Psycho 100").
 - **Medium:** a record's `mediaType` is `comic`, or `book` for a series MangaBaka files as a novel,
   so a client can tell a light novel from its manga.
 - **Ids** are MangaBaka's series id, with `v` and the volume for a volume (`1692v3`), so looking
