@@ -12,7 +12,8 @@ use serde_json::json;
 
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
-    author_matches, map_series, names_exactly, shares_a_word, split_volume, BookMetadata,
+    author_matches, map_series, names_exactly, search_queries, shared_words, shares_a_word,
+    split_volume, BookMetadata,
 };
 use crate::{Config, VERSION};
 
@@ -87,23 +88,46 @@ async fn search(
         .map_or(DEFAULT_LIMIT, |n| n.clamp(1, MAX_LIMIT));
     let (title, volume) = split_volume(query);
 
-    let found =
-        match tokio::time::timeout(REQUEST_TIMEOUT, state.mb.search_series(&title, limit)).await {
-            Ok(Ok(found)) => found,
-            Ok(Err(err)) => return upstream_error("search", err),
-            Err(_) => return upstream_error("search", UpstreamError::Failed("timed out".into())),
-        };
+    let found = match tokio::time::timeout(REQUEST_TIMEOUT, find_series(&state.mb, &title, limit))
+        .await
+    {
+        Ok(Ok(found)) => found,
+        Ok(Err(err)) => return upstream_error("search", err),
+        Err(_) => return upstream_error("search", UpstreamError::Failed("timed out".into())),
+    };
 
     let author = q.get("author").map(|v| v.trim()).unwrap_or_default();
-    let mut active: Vec<&Series> = found
-        .iter()
-        .filter(|s| s.state == "active" && shares_a_word(s, &title))
-        .collect();
-    // The asked-for author's series first, then one named exactly as asked, otherwise MangaBaka's
-    // own order: "Spy x Family" is the series, not the "Spy x Family: Family Portrait" novel.
-    active.sort_by_key(|s| (!author_matches(s, author), !names_exactly(s, &title)));
+    let mut active: Vec<&Series> = found.iter().collect();
+    // The asked-for author's series first, then one named exactly as asked, then the one sharing
+    // the most words with the query, otherwise MangaBaka's own order: "Spy x Family" is the
+    // series, not the "Spy x Family: Family Portrait" novel.
+    active.sort_by_key(|s| {
+        (
+            !author_matches(s, author),
+            !names_exactly(s, &title),
+            std::cmp::Reverse(shared_words(s, &title)),
+        )
+    });
     let matches: Vec<BookMetadata> = active.into_iter().map(|s| map_series(s, &volume)).collect();
     Json(json!({ "matches": matches })).into_response()
+}
+
+/// Searches MangaBaka with each wording of `title` in turn and returns the active series of the
+/// first answer that has any worth keeping. A search can be asked in any language, but one that
+/// found nothing is retried shorter, since MangaBaka answers nothing to a query carrying words
+/// none of the series' names have.
+async fn find_series(mb: &Client, title: &str, limit: usize) -> Result<Vec<Series>, UpstreamError> {
+    for wording in search_queries(title) {
+        let found = mb.search_series(&wording, limit).await?;
+        let usable: Vec<Series> = found
+            .into_iter()
+            .filter(|s| s.state == "active" && shares_a_word(s, title))
+            .collect();
+        if !usable.is_empty() {
+            return Ok(usable);
+        }
+    }
+    Ok(Vec::new())
 }
 
 async fn lookup(
@@ -304,6 +328,22 @@ mod tests {
         assert_eq!(matches.len(), 5);
         assert_eq!(matches[0]["providerId"], "1692v3");
         assert_eq!(matches[0]["series"][0]["sequence"], "3");
+    }
+
+    #[tokio::test]
+    async fn search_retries_shorter_when_the_long_query_finds_nothing() {
+        let (base, _) = provider(None).await;
+        // The fake answers only to "Berserk", so "Berserk the Comic" has to be retried without
+        // its edition word, and the chapter still becomes the series position.
+        let (code, body, _) = get_json(
+            &format!("{base}/search?query=Berserk+the+Comic+Ch.+9&mediaType=comic"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200);
+        let matches = body["matches"].as_array().unwrap();
+        assert_eq!(matches[0]["providerId"], "1692v9");
+        assert_eq!(matches[0]["series"][0]["sequence"], "9");
     }
 
     #[tokio::test]
