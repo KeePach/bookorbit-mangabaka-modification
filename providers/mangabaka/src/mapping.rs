@@ -359,8 +359,9 @@ fn english_title(s: &Series) -> String {
         })
         .or_else(|| english.first())
         .and_then(|t| t.title.clone())
+        .or_else(|| s.title.clone().filter(|t| t.chars().any(|c| c.is_ascii_alphabetic())))
+        .or_else(|| s.romanized_title.clone().filter(|t| !t.trim().is_empty()))
         .or_else(|| s.title.clone().filter(|t| !t.trim().is_empty()))
-        .or_else(|| s.romanized_title.clone())
         .unwrap_or_default()
 }
 
