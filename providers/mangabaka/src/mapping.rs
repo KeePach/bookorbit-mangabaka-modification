@@ -231,9 +231,11 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
         } else {
             format!("{series_title} - {volume}")
         },
+        // The series index is a bare number: the chapter if there is one, else the volume, else
+        // nothing at all (the full "Vol. 2 Ch. 8" label stays in the title only).
         series: vec![SeriesEntry {
             series: series_title,
-            sequence: volume.to_string(),
+            sequence: provider_index.clone(),
         }],
         authors,
         publisher,
@@ -557,7 +559,7 @@ mod tests {
             book.series,
             [SeriesEntry {
                 series: "Berserk".into(),
-                sequence: "Vol. 3".into()
+                sequence: "3".into()
             }]
         );
         assert!(!book.cover.is_empty());
@@ -575,6 +577,17 @@ mod tests {
         let book = map_series(&load_series(SERIES_1692), "Vol. 2 Ch. 11");
         assert_eq!(book.provider_id, "1692v11");
         assert_eq!(book.title, "Berserk - Vol. 2 Ch. 11");
+    }
+
+    #[test]
+    fn series_index_is_chapter_else_volume_else_nothing() {
+        let series = load_series(SERIES_1692);
+        let sequence = |label: &str| map_series(&series, label).series[0].sequence.clone();
+        assert_eq!(sequence("Vol. 2 Ch. 8"), "8");
+        assert_eq!(sequence("Ch. 8"), "8");
+        assert_eq!(sequence("Vol. 2"), "2");
+        assert_eq!(sequence("Vol. 10.5"), "10.5");
+        assert_eq!(sequence(""), "");
     }
 
     #[test]
