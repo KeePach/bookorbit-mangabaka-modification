@@ -12,8 +12,8 @@ use serde_json::json;
 
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
-    author_matches, map_series, names_exactly, search_queries, shared_words, shares_a_word,
-    split_volume, BookMetadata,
+    author_matches, display_title, map_series, names_exactly, search_queries, shared_words,
+    shares_a_word, split_volume, BookMetadata,
 };
 use crate::{Config, VERSION};
 
@@ -108,7 +108,14 @@ async fn search(
             std::cmp::Reverse(shared_words(s, &title)),
         )
     });
-    let matches: Vec<BookMetadata> = active.into_iter().map(|s| map_series(s, &volume)).collect();
+    let matches: Vec<BookMetadata> = active
+        .into_iter()
+        .map(|s| {
+            let mut book = map_series(s, &volume);
+            book.display_title = display_title(s, &title, &volume);
+            book
+        })
+        .collect();
     Json(json!({ "matches": matches })).into_response()
 }
 
@@ -119,15 +126,10 @@ async fn search(
 async fn find_series(mb: &Client, title: &str, limit: usize) -> Result<Vec<Series>, UpstreamError> {
     for wording in search_queries(title) {
         let found = mb.search_series(&wording, limit).await?;
-        let upstream = found.len();
         let usable: Vec<Series> = found
             .into_iter()
             .filter(|s| s.state == "active" && shares_a_word(s, title))
             .collect();
-        eprintln!(
-            "[provider.search] wording={wording:?} upstream={upstream} kept={}",
-            usable.len()
-        );
         if !usable.is_empty() {
             return Ok(usable);
         }
