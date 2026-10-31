@@ -119,10 +119,15 @@ async fn search(
 async fn find_series(mb: &Client, title: &str, limit: usize) -> Result<Vec<Series>, UpstreamError> {
     for wording in search_queries(title) {
         let found = mb.search_series(&wording, limit).await?;
+        let upstream = found.len();
         let usable: Vec<Series> = found
             .into_iter()
             .filter(|s| s.state == "active" && shares_a_word(s, title))
             .collect();
+        eprintln!(
+            "[provider.search] wording={wording:?} upstream={upstream} kept={}",
+            usable.len()
+        );
         if !usable.is_empty() {
             return Ok(usable);
         }
