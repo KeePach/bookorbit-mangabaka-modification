@@ -301,12 +301,68 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
     }
 }
 
-/// The series name that best matches what was searched, written like the title ("Name - Ch. 10"),
-/// or nothing when the English title is already the best match. BookOrbit drops a result whose
-/// title shares too little with the query, so a romanized or native query would lose a series
-/// whose English name it never uses. `title` stays English; this is only what gets compared.
-pub fn display_title(s: &Series, query: &str, volume: &str) -> String {
-    let wanted: HashSet<String> = title_words(query)
+/// The words BookOrbit leaves out of a query when it checks a result against it.
+const BOOKORBIT_STOPWORDS: &[&str] = &[
+    "the", "an", "and", "or", "of", "in", "on", "at", "to", "for", "with", "from", "by", "is", "it",
+    "as", "be", "are", "was", "were", "this", "that", "these", "those", "into", "over", "under",
+    "its", "his", "her", "their", "our", "your", "my",
+];
+
+/// Whether BookOrbit's own relevance check would keep a result titled `candidate` for `query`: a
+/// result survives when more than half of the query's meaningful words (one-letter words and the
+/// stopwords above do not count) are in its title. A little stricter than BookOrbit's 50% so a
+/// borderline result gets help instead of being lost.
+fn reads_as_match(query: &str, candidate: &str) -> bool {
+    let wanted: Vec<String> = title_words(query)
+        .into_iter()
+        .filter(|word| word.chars().count() > 1 && !BOOKORBIT_STOPWORDS.contains(&word.as_str()))
+        .collect();
+    if wanted.is_empty() {
+        return true;
+    }
+    let have: HashSet<String> = title_words(candidate).into_iter().collect();
+    let shared = wanted.iter().filter(|word| have.contains(*word)).count();
+    shared * 100 > wanted.len() * 55
+}
+
+/// The part of a query from its first volume/chapter marker on, as written: "Vol.01 Ch.0002 -
+/// Chapter name (en) [group]". Empty when there is no marker, or when the query starts with it.
+pub fn query_tail(query: &str) -> String {
+    let query = query.trim();
+    let start = [&VOLUME, &CHAPTER]
+        .into_iter()
+        .filter_map(|pattern| pattern.find(query))
+        .map(|found| found.start())
+        .min();
+    match start {
+        Some(start) if !query[..start].trim().is_empty() => query[start..]
+            .trim_start_matches(|c: char| c.is_whitespace() || "-\u{2013}\u{2014}:([_".contains(c))
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+/// What BookOrbit should compare the search against when the title it would use, the English name
+/// with the volume, does not read like the query. BookOrbit drops a result that shares too little
+/// with the query, and a file name carries a lot that no series name has: a romanized or native
+/// name, a chapter title, a language, a scanlation group. So this is the series name that fits the
+/// query best (`head`, the query up to its volume/chapter) followed by the query's own tail, which
+/// scores as the query itself. Nothing is sent when the English title already reads as a match, or
+/// when no name of the series resembles `head`: BookOrbit's own check then stands. `title` and the
+/// series stay English; this is only what gets compared.
+pub fn display_title(s: &Series, head: &str, query: &str, volume: &str) -> String {
+    let english = tidy_title(&english_title(s));
+    let plain = if volume.is_empty() {
+        english.clone()
+    } else {
+        format!("{english} - {volume}")
+    };
+    if reads_as_match(query, &plain) {
+        return String::new();
+    }
+
+    let wanted: HashSet<String> = title_words(head)
         .into_iter()
         .filter(|word| !SMALL_WORDS.contains(&word.as_str()))
         .collect();
@@ -317,7 +373,6 @@ pub fn display_title(s: &Series, query: &str, volume: &str) -> String {
             .collect::<HashSet<String>>()
             .len()
     };
-    let english = tidy_title(&english_title(s));
     let mut best = english.clone();
     let mut best_overlap = overlap(&english);
     for name in all_titles(s) {
@@ -327,12 +382,16 @@ pub fn display_title(s: &Series, query: &str, volume: &str) -> String {
             best_overlap = name_overlap;
         }
     }
-    if best == english {
-        String::new()
-    } else if volume.is_empty() {
+    if best_overlap * 2 < wanted.len() {
+        return String::new();
+    }
+
+    let tail = query_tail(query);
+    let label = if tail.is_empty() { volume } else { tail.as_str() };
+    if label.is_empty() {
         best
     } else {
-        format!("{best} - {volume}")
+        format!("{best} - {label}")
     }
 }
 
@@ -705,19 +764,38 @@ mod tests {
             ),
             ..Default::default()
         };
+        // A romanized query: the romanized name, then the query's own tail.
+        let romanized = "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu the Comic Vol. 2 Ch 10";
         assert_eq!(
             display_title(
                 &series,
                 "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu the Comic",
-                "Ch. 10"
+                romanized,
+                "Vol. 2 Ch. 10"
             ),
-            "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu - Ch. 10"
+            "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu - Vol. 2 Ch 10"
         );
-        // An English query already matches the English title: nothing to add.
-        assert_eq!(
-            display_title(&series, "A Gamer Is Going to Live a Harem Life in Another World", "Ch. 10"),
-            ""
-        );
+        // An English query already reads as a match: nothing to add.
+        let english = "A Gamer Is Going to Live a Harem Life in Another World";
+        assert_eq!(display_title(&series, english, english, ""), "");
+    }
+
+    #[test]
+    fn display_title_carries_a_noisy_file_name() {
+        let series = Series {
+            title: Some("Zetsurin!".into()),
+            ..Default::default()
+        };
+        let file = "Zetsurin! - Vol.01 Ch.0002 - Life Begins to Get Strange (en) [Psylocke Scans, Renzokusei Scans]";
+        assert_eq!(display_title(&series, "Zetsurin!", file, "Vol. 1 Ch. 2"), file);
+        // A series that looks nothing like the title part of the query is not helped.
+        let other = Series {
+            title: Some("Something Else Entirely".into()),
+            ..Default::default()
+        };
+        assert_eq!(display_title(&other, "Zetsurin!", file, "Vol. 1 Ch. 2"), "");
+        assert_eq!(query_tail(file), "Vol.01 Ch.0002 - Life Begins to Get Strange (en) [Psylocke Scans, Renzokusei Scans]");
+        assert_eq!(query_tail("Berserk"), "");
     }
 
     #[test]
