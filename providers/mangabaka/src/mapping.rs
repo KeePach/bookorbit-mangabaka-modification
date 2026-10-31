@@ -72,6 +72,10 @@ static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\
 static TRAILING_JUNK: LazyLock<Regex> =
     LazyLock::new(|| regex(r"[\s,.:;_\-\x{2013}\x{2014}(\[]+$"));
 static SPACES: LazyLock<Regex> = LazyLock::new(|| regex(r"\s+"));
+// A trailing edition word a file name adds but the series' own names do not: "... the Comic".
+static EDITION_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
+    regex(r"(?i)[\s\-:(\[]+(?:the\s+)?(?:light\s+novel|web\s+novel|comics?|manga|novel|webtoon|manhwa|manhua)[\s)\]]*$")
+});
 
 // MangaBaka descriptions are Markdown; clients expect plain text.
 static MARKDOWN_LINK: LazyLock<Regex> = LazyLock::new(|| regex(r"\[([^\]]+)\]\([^)]*\)"));
@@ -424,6 +428,44 @@ pub fn shares_a_word(s: &Series, query: &str) -> bool {
     })
 }
 
+/// The wordings to search MangaBaka with, most specific first: the title as given, then without a
+/// trailing edition word ("... the Comic", "(Light Novel)"), then its first half. MangaBaka's
+/// search answers nothing when the query has words none of the series' names have, which a
+/// romanized or fan-translated file name often does, so a longer query that finds nothing is
+/// retried shorter.
+pub fn search_queries(title: &str) -> Vec<String> {
+    let title = title.trim();
+    let bare = strip_title_suffix(&EDITION_SUFFIX.replace(title, ""));
+    let words: Vec<&str> = bare.split_whitespace().collect();
+    let mut queries = vec![title.to_string(), bare.clone()];
+    if words.len() >= 6 {
+        queries.push(words[..(words.len() / 2).max(3)].join(" "));
+    }
+    let mut seen = HashSet::new();
+    queries.retain(|query| !query.is_empty() && seen.insert(query.to_lowercase()));
+    queries
+}
+
+/// How many of the query's distinct words (small words like "the" aside) the best-matching of the
+/// series' names has. Orders the results of a shortened search by how much of the title they match.
+pub fn shared_words(s: &Series, query: &str) -> usize {
+    let wanted: HashSet<String> = title_words(query)
+        .into_iter()
+        .filter(|word| !SMALL_WORDS.contains(&word.as_str()))
+        .collect();
+    all_titles(s)
+        .iter()
+        .map(|title| {
+            title_words(title)
+                .into_iter()
+                .filter(|word| wanted.contains(word))
+                .collect::<HashSet<String>>()
+                .len()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// The English-language publisher is the edition most libraries hold, then the original one.
 fn pick_publisher(publishers: &[Publisher]) -> String {
     for wanted in ["English", "Original"] {
@@ -611,6 +653,24 @@ mod tests {
         let book = map_series(&load_series(SERIES_1692), "Vol. 2 Ch. 11");
         assert_eq!(book.provider_id, "1692v11");
         assert_eq!(book.title, "Berserk - Vol. 2 Ch. 11");
+    }
+
+    #[test]
+    fn search_retries_with_shorter_wordings() {
+        assert_eq!(
+            search_queries(
+                "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu the Comic"
+            ),
+            [
+                "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu the Comic",
+                "Gamer ga Isekai Konten shite Harem Jinsei e Continue suru Sou desu",
+                "Gamer ga Isekai Konten shite Harem",
+            ]
+        );
+        assert_eq!(search_queries("Berserk the Comic"), ["Berserk the Comic", "Berserk"]);
+        assert_eq!(search_queries("Berserk"), ["Berserk"]);
+        assert_eq!(search_queries("Manga"), ["Manga"]);
+        assert_eq!(search_queries("ベルセルク"), ["ベルセルク"]);
     }
 
     #[test]
