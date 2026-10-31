@@ -112,7 +112,7 @@ async fn search(
         .into_iter()
         .map(|s| {
             let mut book = map_series(s, &volume);
-            book.display_title = display_title(s, &title, &volume);
+            book.display_title = display_title(s, &title, query, &volume);
             book
         })
         .collect();
