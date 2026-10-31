@@ -5,10 +5,14 @@ mod server;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const VERSION: &str = "0.1.2";
+pub const VERSION: &str = "0.1.5";
 
 pub struct Config {
     pub auth_token: Option<String>,
+    /// Where a browser reaches this provider (`PUBLIC_URL`), for the "open on MangaBaka" links.
+    /// Without it the provider declares no link template, and a book gets a link only when its
+    /// id was applied from a search.
+    pub public_url: Option<String>,
     /// Gaps between upstream requests. MangaBaka allows 30 searches and 180 other requests a
     /// minute per IP, so the defaults stay just inside both.
     pub search_interval: Duration,
@@ -27,6 +31,10 @@ async fn main() {
         auth_token: std::env::var("AUTH_TOKEN")
             .ok()
             .filter(|token| !token.is_empty()),
+        public_url: std::env::var("PUBLIC_URL")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| url.starts_with("http://") || url.starts_with("https://")),
         search_interval: env_millis("SEARCH_INTERVAL_MS", 2000),
         lookup_interval: env_millis("LOOKUP_INTERVAL_MS", 340),
     };
