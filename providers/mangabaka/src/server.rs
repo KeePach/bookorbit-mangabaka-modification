@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use regex::Regex;
@@ -37,10 +37,16 @@ pub fn routes(cfg: Arc<Config>, mb: Arc<Client>) -> Router {
         .route("/provider/info", get(info))
         .route("/search", get(search))
         .route("/book/{id}", get(lookup))
+        .route("/open/{id}", get(open))
         .with_state(AppState { cfg, mb })
 }
 
 async fn info(State(state): State<AppState>) -> Response {
+    let link_template = state
+        .cfg
+        .public_url
+        .as_ref()
+        .map(|base| format!("{base}/open/{{id}}"));
     Json(json!({
         "name": "MangaBaka",
         "version": VERSION,
@@ -57,7 +63,10 @@ async fn info(State(state): State<AppState>) -> Response {
         ],
         "searchParams": ["limit"],
         "idMaxLength": MAX_ID_LENGTH,
-        // No `bookUrlTemplate`: a volume's id is not a page. Every record carries its series' page.
+        // A volume's id is not a page, so the template points at this provider's own `/open/{id}`,
+        // which sends the browser on to the series' page. Only declared when `PUBLIC_URL` says
+        // where a browser can reach this provider.
+        "bookUrlTemplate": link_template,
         "coverShape": "portrait",
         // MangaBaka's own `--primary`.
         "color": "#e30047",
@@ -153,21 +162,54 @@ async fn lookup(
     };
     let volume = captures.get(2).map_or("", |m| m.as_str()).to_string();
 
-    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        let found = state.mb.series(id).await?;
-        // A series merged into another answers with the one it now lives in, once.
-        match (found.state.as_str(), found.merged_with) {
-            ("merged", Some(target)) => state.mb.series(target).await,
-            _ => Ok(found),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| Err(UpstreamError::Failed("timed out".into())));
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, series_by_id(&state.mb, id))
+        .await
+        .unwrap_or_else(|_| Err(UpstreamError::Failed("timed out".into())));
 
     match result {
         Ok(found) if found.state == "active" => Json(map_series(&found, &volume)).into_response(),
         Ok(_) | Err(UpstreamError::NotFound) => error(StatusCode::NOT_FOUND, "Not found"),
         Err(err) => upstream_error("lookup", err),
+    }
+}
+
+/// A series by id. One merged into another answers with the one it now lives in, once.
+async fn series_by_id(mb: &Client, id: u64) -> Result<Series, UpstreamError> {
+    let found = mb.series(id).await?;
+    match (found.state.as_str(), found.merged_with) {
+        ("merged", Some(target)) => mb.series(target).await,
+        _ => Ok(found),
+    }
+}
+
+/// Sends a browser to the MangaBaka page of the series an id belongs to (`1692v3` and `1692` both
+/// go to series 1692). It is what a provider link opens, so it answers without the auth token a
+/// browser cannot send, and it only ever redirects to mangabaka.org.
+async fn open(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+    let Some(captures) = BOOK_ID.captures(&raw) else {
+        return error(StatusCode::NOT_FOUND, "Not found");
+    };
+    let Ok(id) = captures[1].parse::<u64>() else {
+        return error(StatusCode::NOT_FOUND, "Not found");
+    };
+
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, series_by_id(&state.mb, id))
+        .await
+        .unwrap_or_else(|_| Err(UpstreamError::Failed("timed out".into())));
+
+    match result {
+        Ok(found) if found.state == "active" => {
+            match found
+                .canonical_url
+                .as_deref()
+                .filter(|url| url.starts_with("https://mangabaka.org/"))
+            {
+                Some(url) => Redirect::temporary(url).into_response(),
+                None => error(StatusCode::NOT_FOUND, "Not found"),
+            }
+        }
+        Ok(_) | Err(UpstreamError::NotFound) => error(StatusCode::NOT_FOUND, "Not found"),
+        Err(err) => upstream_error("open", err),
     }
 }
 
@@ -279,6 +321,7 @@ mod tests {
         let upstream = fake_mangabaka(status.clone()).await;
         let cfg = Config {
             auth_token: auth_token.map(str::to_string),
+            public_url: Some("http://localhost:9999".to_string()),
             search_interval: Duration::from_secs(2),
             lookup_interval: Duration::ZERO,
         };
@@ -320,6 +363,32 @@ mod tests {
                 Some("#e30047")
             )
         );
+    }
+
+    #[tokio::test]
+    async fn open_sends_a_volume_id_to_its_series_page() {
+        let (base, _) = provider(None).await;
+        // Keep the redirect itself: following it would leave the test for mangabaka.org.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        for id in ["1692v3", "1692", "999001"] {
+            let res = client.get(format!("{base}/open/{id}")).send().await.unwrap();
+            assert_eq!(res.status().as_u16(), 307, "open {id}");
+            assert_eq!(
+                res.headers()["location"],
+                "https://mangabaka.org/manga/1692/BERSERK",
+                "open {id}"
+            );
+        }
+        for id in ["abc", "1692v", "5"] {
+            let res = client.get(format!("{base}/open/{id}")).send().await.unwrap();
+            assert_eq!(res.status().as_u16(), 404, "open {id}");
+        }
+        // The link template BookOrbit stores points at it.
+        let (_, info, _) = get_json(&format!("{base}/provider/info"), None).await;
+        assert_eq!(info["bookUrlTemplate"], "http://localhost:9999/open/{id}");
     }
 
     #[tokio::test]
