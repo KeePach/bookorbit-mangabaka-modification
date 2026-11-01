@@ -80,6 +80,8 @@ static SPACES: LazyLock<Regex> = LazyLock::new(|| regex(r"\s+"));
 // stripped the "Ch." from "Title - Ch. 39".
 static BARE_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| regex(r"\s[-\x{2013}\x{2014}]\s*([0-9]{1,4}(?:\.[0-9]+)?)\s*$"));
+// A parenthesized, bracketed or braced part of a file name: "(2010)", "(en)", "[group]".
+static BRACKETED: LazyLock<Regex> = LazyLock::new(|| regex(r"\s*[(\[{][^)\]}]*[)\]}]"));
 // A trailing edition word a file name adds but the series' own names do not: "... the Comic".
 static EDITION_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
     regex(r"(?i)[\s\-:(\[]+(?:the\s+)?(?:light\s+novel|web\s+novel|comics?|manga|novel|webtoon|manhwa|manhua)[\s)\]]*$")
@@ -349,6 +351,12 @@ const BOOKORBIT_STOPWORDS: &[&str] = &[
 /// stopwords above do not count) are in its title. A little stricter than BookOrbit's 50% so a
 /// borderline result gets help instead of being lost.
 fn reads_as_match(query: &str, candidate: &str) -> bool {
+    // BookOrbit also keeps a result whose whole title sits inside the query as whole words, or
+    // the other way round ("[Group] Series (en)" holds "Series").
+    let (query_words, candidate_words) = (title_words(query), title_words(candidate));
+    if contains_words(&query_words, &candidate_words) || contains_words(&candidate_words, &query_words) {
+        return true;
+    }
     let wanted: Vec<String> = title_words(query)
         .into_iter()
         .filter(|word| word.chars().count() > 1 && !BOOKORBIT_STOPWORDS.contains(&word.as_str()))
@@ -359,6 +367,11 @@ fn reads_as_match(query: &str, candidate: &str) -> bool {
     let have: HashSet<String> = title_words(candidate).into_iter().collect();
     let shared = wanted.iter().filter(|word| have.contains(*word)).count();
     shared * 100 > wanted.len() * 55
+}
+
+/// Whether `needle` appears in `haystack` as a run of whole words.
+fn contains_words(haystack: &[String], needle: &[String]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|run| run == needle)
 }
 
 /// The part of a query from its first volume/chapter marker on, as written: "Vol.01 Ch.0002 -
@@ -424,10 +437,18 @@ pub fn display_title(s: &Series, head: &str, query: &str, volume: &str) -> Strin
 
     let tail = query_tail(query);
     let label = if tail.is_empty() { volume } else { tail.as_str() };
-    if label.is_empty() {
+    let display = if label.is_empty() {
         best
     } else {
         format!("{best} - {label}")
+    };
+    // Words in front of the title ("[Translator](Author) Series (English) Ch 12") are in the query
+    // but in no name of the series. When the rebuilt title still would not read as a match, the
+    // query itself is what scores as one.
+    if reads_as_match(query, &display) {
+        display
+    } else {
+        query.to_string()
     }
 }
 
@@ -564,6 +585,17 @@ pub fn shares_a_word(s: &Series, query: &str) -> bool {
     })
 }
 
+/// The title without its parenthesized, bracketed or braced parts ("Series (2010)" is "Series",
+/// "[Group] Series (en)" is "Series"), or the title itself when nothing else would be left.
+pub fn without_brackets(title: &str) -> String {
+    let stripped = strip_title_suffix(&BRACKETED.replace_all(title, " "));
+    if stripped.is_empty() {
+        title.trim().to_string()
+    } else {
+        stripped
+    }
+}
+
 /// The wordings to search MangaBaka with, most specific first: the title as given, then without a
 /// trailing edition word ("... the Comic", "(Light Novel)"), then its first half. MangaBaka's
 /// search answers nothing when the query has words none of the series' names have, which a
@@ -571,9 +603,13 @@ pub fn shares_a_word(s: &Series, query: &str) -> bool {
 /// retried shorter.
 pub fn search_queries(title: &str) -> Vec<String> {
     let title = title.trim();
-    let bare = strip_title_suffix(&EDITION_SUFFIX.replace(title, ""));
+    // A file name's "(2010)", "(en)" or "[group]" is not part of the series' name and makes
+    // MangaBaka answer nothing, so the title is searched without them first. The title as given
+    // comes next, for the rare series whose name has a bracket in it.
+    let plain = without_brackets(title);
+    let bare = strip_title_suffix(&EDITION_SUFFIX.replace(&plain, ""));
     let words: Vec<&str> = bare.split_whitespace().collect();
-    let mut queries = vec![title.to_string(), bare.clone()];
+    let mut queries = vec![plain, title.to_string(), bare.clone()];
     if words.len() >= 6 {
         queries.push(words[..(words.len() / 2).max(3)].join(" "));
     }
@@ -853,6 +889,34 @@ mod tests {
         assert_eq!(display_title(&other, "Zetsurin!", file, "Vol. 1 Ch. 2"), "");
         assert_eq!(query_tail(file), "Vol.01 Ch.0002 - Life Begins to Get Strange (en) [Psylocke Scans, Renzokusei Scans]");
         assert_eq!(query_tail("Berserk"), "");
+    }
+
+    #[test]
+    fn display_title_copes_with_words_in_front_of_the_title() {
+        let series = Series {
+            title: Some("Series".into()),
+            ..Default::default()
+        };
+        // Noise on both sides of the title: nothing to add when the title still sits inside it.
+        let around = "[Translator](Author) Series (English)";
+        assert_eq!(display_title(&series, "Series", around, ""), "");
+        // Noise between the title and the chapter: the query itself is what scores as a match.
+        let split = "[Translator](Author) Series (English) Ch 12";
+        assert_eq!(display_title(&series, "Series", split, "Ch. 12"), split);
+    }
+
+    #[test]
+    fn brackets_are_left_out_of_the_search() {
+        assert_eq!(without_brackets("Series (2010)"), "Series");
+        assert_eq!(without_brackets("Series (en)"), "Series");
+        assert_eq!(without_brackets("[Group] Series Name (en) [x]"), "Series Name");
+        assert_eq!(without_brackets("(2010)"), "(2010)");
+        assert_eq!(without_brackets("Series"), "Series");
+        // Searched without the brackets first, then as given.
+        assert_eq!(search_queries("Series (2010)"), ["Series", "Series (2010)"]);
+        assert_eq!(search_queries("Series (en)"), ["Series", "Series (en)"]);
+        assert_eq!(search_queries("Solo Leveling (Light Novel)"), ["Solo Leveling", "Solo Leveling (Light Novel)"]);
+        assert_eq!(search_queries("Series"), ["Series"]);
     }
 
     #[test]
