@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
     author_matches, display_title, index_label, map_series, names_exactly, search_queries,
-    shared_words, shares_a_word, split_volume, BookMetadata,
+    shared_words, shares_a_word, split_volume, without_brackets, BookMetadata,
 };
 use crate::{Config, VERSION};
 
@@ -98,10 +98,16 @@ async fn search(
         .get("limit")
         .and_then(|v| v.parse::<usize>().ok())
         .map_or(DEFAULT_LIMIT, |n| n.clamp(1, MAX_LIMIT));
-    let (title, volume) = split_volume(query);
+    let (head, volume) = split_volume(query);
+    // What the series is matched and ordered by has no "(2010)" or "[group]" in it; the search
+    // itself tries the head with and without them (see `search_queries`).
+    let title = without_brackets(&head);
 
-    let found = match tokio::time::timeout(REQUEST_TIMEOUT, find_series(&state.mb, &title, limit))
-        .await
+    let found = match tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        find_series(&state.mb, &head, &title, limit),
+    )
+    .await
     {
         Ok(Ok(found)) => found,
         Ok(Err(err)) => return upstream_error("search", err),
@@ -135,8 +141,13 @@ async fn search(
 /// first answer that has any worth keeping. A search can be asked in any language, but one that
 /// found nothing is retried shorter, since MangaBaka answers nothing to a query carrying words
 /// none of the series' names have.
-async fn find_series(mb: &Client, title: &str, limit: usize) -> Result<Vec<Series>, UpstreamError> {
-    for wording in search_queries(title) {
+async fn find_series(
+    mb: &Client,
+    head: &str,
+    title: &str,
+    limit: usize,
+) -> Result<Vec<Series>, UpstreamError> {
+    for wording in search_queries(head) {
         let found = mb.search_series(&wording, limit).await?;
         let usable: Vec<Series> = found
             .into_iter()
@@ -412,6 +423,28 @@ mod tests {
         assert_eq!(matches.len(), 5);
         assert_eq!(matches[0]["providerId"], "1692vol3");
         assert_eq!(matches[0]["series"][0]["sequence"], "3");
+    }
+
+    #[tokio::test]
+    async fn search_leaves_the_brackets_of_a_file_name_out() {
+        let (base, _) = provider(None).await;
+        // The fake answers only to "Berserk": the year, the language and the group are noise.
+        for query in [
+            "Berserk+(2010)",
+            "Berserk+(en)",
+            "Berserk+(2010)+(en)+%5BGroup%5D",
+            "Berserk+(2010)+-+Ch.+9",
+        ] {
+            let (code, body, _) = get_json(
+                &format!("{base}/search?query={query}&mediaType=comic"),
+                None,
+            )
+            .await;
+            assert_eq!(code, 200, "{query}");
+            let matches = body["matches"].as_array().unwrap();
+            assert!(!matches.is_empty(), "{query}");
+            assert!(matches[0]["title"].as_str().unwrap().starts_with("Berserk"), "{query}");
+        }
     }
 
     #[tokio::test]
