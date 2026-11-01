@@ -12,8 +12,8 @@ use serde_json::json;
 
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
-    author_matches, display_title, map_series, names_exactly, search_queries, shared_words,
-    shares_a_word, split_volume, BookMetadata,
+    author_matches, display_title, index_label, map_series, names_exactly, search_queries,
+    shared_words, shares_a_word, split_volume, BookMetadata,
 };
 use crate::{Config, VERSION};
 
@@ -23,7 +23,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// A series id, then `v` and a volume for one volume of it: `1692`, `1692v3`, `1692v10.5`.
 const MAX_ID_LENGTH: usize = 20;
 static BOOK_ID: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^([0-9]{1,12})(?:v([0-9]{1,4}(?:\.[0-9]{1,2})?))?$").expect("valid id pattern")
+    Regex::new(
+        r"^([0-9]{1,12})(?:vol([0-9]{1,4}(?:\.[0-9]{1,2})?))?(?:v([0-9]{1,4}(?:\.[0-9]{1,2})?))?$",
+    )
+    .expect("valid id pattern")
 });
 
 #[derive(Clone)]
@@ -160,7 +163,12 @@ async fn lookup(
     let Ok(id) = captures[1].parse::<u64>() else {
         return error(StatusCode::NOT_FOUND, "Not found");
     };
-    let volume = captures.get(2).map_or("", |m| m.as_str()).to_string();
+    // The id says which volume and chapter it is, so the title and the series index come out the
+    // same as the search wrote them: "vol2v8" is "Vol. 2 Ch. 8", "v8" is "Ch. 8".
+    let volume = index_label(
+        captures.get(2).map_or("", |m| m.as_str()),
+        captures.get(3).map_or("", |m| m.as_str()),
+    );
 
     let result = tokio::time::timeout(REQUEST_TIMEOUT, series_by_id(&state.mb, id))
         .await
@@ -402,7 +410,7 @@ mod tests {
         assert_eq!(code, 200);
         let matches = body["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 5);
-        assert_eq!(matches[0]["providerId"], "1692v3");
+        assert_eq!(matches[0]["providerId"], "1692vol3");
         assert_eq!(matches[0]["series"][0]["sequence"], "3");
     }
 
@@ -459,17 +467,24 @@ mod tests {
         let (base, _) = provider(None).await;
         let (code, body, _) = get_json(&format!("{base}/book/999001"), None).await;
         assert_eq!((code, body["providerId"].as_str()), (200, Some("1692")));
-        // A volume's id answers that volume, as the search did.
-        let (code, body, _) = get_json(&format!("{base}/book/1692v3"), None).await;
-        assert_eq!(
-            (
-                code,
-                body["title"].as_str(),
-                body["series"][0]["sequence"].as_str()
-            ),
-            (200, Some("Berserk, Vol. 3"), Some("3"))
-        );
-        for id in ["5", "abc", "..", &"9".repeat(13), "1692v", "1692v3v4"] {
+        // An id answers the volume or chapter it names, titled as the search titled it.
+        for (id, title, sequence) in [
+            ("1692vol3", "Berserk - Vol. 3", "3"),
+            ("1692v3", "Berserk - Ch. 3", "3"),
+            ("1692vol2v11", "Berserk - Vol. 2 Ch. 11", "11"),
+        ] {
+            let (code, body, _) = get_json(&format!("{base}/book/{id}"), None).await;
+            assert_eq!(
+                (
+                    code,
+                    body["title"].as_str(),
+                    body["series"][0]["sequence"].as_str()
+                ),
+                (200, Some(title), Some(sequence)),
+                "lookup {id}"
+            );
+        }
+        for id in ["5", "abc", "..", &"9".repeat(13), "1692v", "1692v3v4", "1692vol", "1692v3vol2"] {
             let (code, _, _) = get_json(&format!("{base}/book/{id}"), None).await;
             assert_eq!(code, 404, "lookup {id}");
         }
