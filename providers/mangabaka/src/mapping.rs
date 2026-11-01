@@ -76,6 +76,10 @@ static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\
 static TRAILING_JUNK: LazyLock<Regex> =
     LazyLock::new(|| regex(r"[\s,.:;_\-\x{2013}\x{2014}(\[]+$"));
 static SPACES: LazyLock<Regex> = LazyLock::new(|| regex(r"\s+"));
+// A number left alone after a dash ("Title - 39"): what a title looks like once something has
+// stripped the "Ch." from "Title - Ch. 39".
+static BARE_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| regex(r"\s[-\x{2013}\x{2014}]\s*([0-9]{1,4}(?:\.[0-9]+)?)\s*$"));
 // A trailing edition word a file name adds but the series' own names do not: "... the Comic".
 static EDITION_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
     regex(r"(?i)[\s\-:(\[]+(?:the\s+)?(?:light\s+novel|web\s+novel|comics?|manga|novel|webtoon|manhwa|manhua)[\s)\]]*$")
@@ -175,6 +179,23 @@ pub fn split_volume(query: &str) -> (String, String) {
     let volume = number(&volume_match);
     let chapter = number(&chapter_match);
 
+    // A title an earlier scrape left with only its number ("Title - 39") has lost its marker.
+    // Read the number as the chapter, so scraping the same book again keeps it instead of
+    // dropping it. A year is not a chapter.
+    if volume.is_empty() && chapter.is_empty() {
+        let bare = BARE_NUMBER.captures(query).and_then(|captures| {
+            let start = captures.get(0)?.start();
+            let number = normalize_number(captures.get(1)?.as_str());
+            let is_year = number.parse::<u32>().is_ok_and(|n| (1900..=2100).contains(&n));
+            (!is_year && !query[..start].trim().is_empty()).then(|| (start, number))
+        });
+        if let Some((start, number)) = bare {
+            let cleaned = trim_title_prefix(&strip_title_suffix(query[..start].trim()));
+            let label = index_label("", &number);
+            return if cleaned.is_empty() { (query.to_string(), label) } else { (cleaned, label) };
+        }
+    }
+
     let first_marker = [&volume_match, &chapter_match]
         .into_iter()
         .flatten()
@@ -188,17 +209,36 @@ pub fn split_volume(query: &str) -> (String, String) {
     };
 
     let cleaned = trim_title_prefix(&strip_title_suffix(&cleaned));
-    let normalized = match (volume.is_empty(), chapter.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => format!("Vol. {volume}"),
-        (true, false) => format!("Ch. {chapter}"),
-        (false, false) => format!("Vol. {volume} Ch. {chapter}"),
-    };
+    let normalized = index_label(&volume, &chapter);
 
     if cleaned.is_empty() {
         (query.to_string(), normalized)
     } else {
         (cleaned, normalized)
+    }
+}
+
+/// The label a title carries for a volume and/or a chapter: "Vol. 2 Ch. 8", "Ch. 8", "Vol. 2",
+/// or nothing.
+pub fn index_label(volume: &str, chapter: &str) -> String {
+    match (volume.is_empty(), chapter.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("Vol. {volume}"),
+        (true, false) => format!("Ch. {chapter}"),
+        (false, false) => format!("Vol. {volume} Ch. {chapter}"),
+    }
+}
+
+/// What follows the series id in a provider id, so the id says which volume or chapter it is and
+/// a lookup by id can write the same title again: `v8` is chapter 8 (the form earlier ids have),
+/// `vol2` is volume 2, `vol2v8` is both.
+fn id_suffix(label: &str) -> String {
+    let (volume, chapter) = series_index_numbers(label);
+    match (volume.is_empty(), chapter.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => format!("v{chapter}"),
+        (false, true) => format!("vol{volume}"),
+        (false, false) => format!("vol{volume}v{chapter}"),
     }
 }
 
@@ -255,11 +295,7 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
         } else {
             "comic"
         },
-        provider_id: if provider_index.is_empty() {
-            s.id.to_string()
-        } else {
-            format!("{}v{provider_index}", s.id)
-        },
+        provider_id: format!("{}{}", s.id, id_suffix(volume)),
         title: if volume.is_empty() {
             series_title.clone()
         } else {
@@ -718,7 +754,7 @@ mod tests {
                 book.title.as_str(),
                 book.media_type
             ),
-            ("1692v3", "Berserk - Vol. 3", "comic")
+            ("1692vol3", "Berserk - Vol. 3", "comic")
         );
         assert_eq!(book.authors, ["Kentaro Miura", "Kouji Mori"]);
         assert_eq!(book.publisher, "Dark Horse Manga");
@@ -749,10 +785,31 @@ mod tests {
     }
 
     #[test]
-    fn prefers_the_chapter_in_provider_ids_when_both_are_present() {
-        let book = map_series(&load_series(SERIES_1692), "Vol. 2 Ch. 11");
-        assert_eq!(book.provider_id, "1692v11");
-        assert_eq!(book.title, "Berserk - Vol. 2 Ch. 11");
+    fn provider_ids_say_which_volume_and_chapter() {
+        let series = load_series(SERIES_1692);
+        let id = |label: &str| map_series(&series, label).provider_id;
+        assert_eq!(id("Ch. 11"), "1692v11");
+        assert_eq!(id("Vol. 3"), "1692vol3");
+        assert_eq!(id("Vol. 2 Ch. 11"), "1692vol2v11");
+        assert_eq!(id(""), "1692");
+        // The series index stays the chapter, else the volume.
+        assert_eq!(map_series(&series, "Vol. 2 Ch. 11").series[0].sequence, "11");
+        assert_eq!(map_series(&series, "Vol. 3").series[0].sequence, "3");
+    }
+
+    #[test]
+    fn a_number_left_after_a_dash_is_read_as_the_chapter() {
+        let split = |query: &str| split_volume(query);
+        assert_eq!(
+            split("Secret Rites with the Holy Maidens - 39"),
+            ("Secret Rites with the Holy Maidens".to_string(), "Ch. 39".to_string())
+        );
+        assert_eq!(split("Foo \u{2013} 10.50"), ("Foo".to_string(), "Ch. 10.5".to_string()));
+        // A marker still wins, and a year, a title's own number or a lone number is left alone.
+        assert_eq!(split("Foo - Ch. 7"), ("Foo".to_string(), "Ch. 7".to_string()));
+        assert_eq!(split("Dune - 2019"), ("Dune - 2019".to_string(), String::new()));
+        assert_eq!(split("Mob Psycho 100"), ("Mob Psycho 100".to_string(), String::new()));
+        assert_eq!(split("- 5"), ("- 5".to_string(), String::new()));
     }
 
     #[test]
