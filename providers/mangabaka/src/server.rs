@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
     author_matches, display_title, index_label, map_series, names_exactly, search_queries,
-    shared_words, shares_a_word, split_volume, without_brackets, BookMetadata,
+    shared_words, shares_a_word, split_volume, without_brackets, BookMetadata, ONESHOT_LABEL,
 };
 use crate::{Config, VERSION};
 
@@ -24,7 +24,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ID_LENGTH: usize = 20;
 static BOOK_ID: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^([0-9]{1,12})(?:vol([0-9]{1,4}(?:\.[0-9]{1,2})?))?(?:v([0-9]{1,4}(?:\.[0-9]{1,2})?))?$",
+        r"^([0-9]{1,12})(?:(os)|(?:vol([0-9]{1,4}(?:\.[0-9]{1,2})?))?(?:v([0-9]{1,4}(?:\.[0-9]{1,2})?(?:-[0-9]{1,4}(?:\.[0-9]{1,2})?)?))?)$",
     )
     .expect("valid id pattern")
 });
@@ -176,10 +176,14 @@ async fn lookup(
     };
     // The id says which volume and chapter it is, so the title and the series index come out the
     // same as the search wrote them: "vol2v8" is "Vol. 2 Ch. 8", "v8" is "Ch. 8".
-    let volume = index_label(
-        captures.get(2).map_or("", |m| m.as_str()),
-        captures.get(3).map_or("", |m| m.as_str()),
-    );
+    let volume = if captures.get(2).is_some() {
+        ONESHOT_LABEL.to_string()
+    } else {
+        index_label(
+            captures.get(3).map_or("", |m| m.as_str()),
+            captures.get(4).map_or("", |m| m.as_str()),
+        )
+    };
 
     let result = tokio::time::timeout(REQUEST_TIMEOUT, series_by_id(&state.mb, id))
         .await
@@ -392,7 +396,7 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
-        for id in ["1692v3", "1692", "999001"] {
+        for id in ["1692v3", "1692", "999001", "1692v0-6", "1692os"] {
             let res = client.get(format!("{base}/open/{id}")).send().await.unwrap();
             assert_eq!(res.status().as_u16(), 307, "open {id}");
             assert_eq!(
@@ -423,6 +427,38 @@ mod tests {
         assert_eq!(matches.len(), 5);
         assert_eq!(matches[0]["providerId"], "1692vol3");
         assert_eq!(matches[0]["series"][0]["sequence"], "3");
+    }
+
+    #[tokio::test]
+    async fn search_keeps_a_oneshot_in_the_title() {
+        let (base, _) = provider(None).await;
+        for query in ["Berserk+Oneshot", "Berserk+-+One-Shot+(en)"] {
+            let (code, body, _) = get_json(
+                &format!("{base}/search?query={query}&mediaType=comic"),
+                None,
+            )
+            .await;
+            assert_eq!(code, 200, "{query}");
+            let matches = body["matches"].as_array().unwrap();
+            assert_eq!(matches[0]["title"], "Berserk - Oneshot", "{query}");
+            assert_eq!(matches[0]["providerId"], "1692os", "{query}");
+            assert!(matches[0]["series"][0].get("sequence").is_none(), "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_keeps_a_range_of_chapters_in_the_title() {
+        let (base, _) = provider(None).await;
+        let (code, body, _) = get_json(
+            &format!("{base}/search?query=Berserk+c000-006&mediaType=comic"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200);
+        let matches = body["matches"].as_array().unwrap();
+        assert_eq!(matches[0]["title"], "Berserk - Ch. 0-6");
+        assert_eq!(matches[0]["providerId"], "1692v0-6");
+        assert_eq!(matches[0]["series"][0]["sequence"], "0");
     }
 
     #[tokio::test]
@@ -502,9 +538,12 @@ mod tests {
         assert_eq!((code, body["providerId"].as_str()), (200, Some("1692")));
         // An id answers the volume or chapter it names, titled as the search titled it.
         for (id, title, sequence) in [
-            ("1692vol3", "Berserk - Vol. 3", "3"),
-            ("1692v3", "Berserk - Ch. 3", "3"),
-            ("1692vol2v11", "Berserk - Vol. 2 Ch. 11", "11"),
+            ("1692vol3", "Berserk - Vol. 3", Some("3")),
+            ("1692v3", "Berserk - Ch. 3", Some("3")),
+            ("1692vol2v11", "Berserk - Vol. 2 Ch. 11", Some("11")),
+            ("1692v0-6", "Berserk - Ch. 0-6", Some("0")),
+            ("1692vol2v7-9", "Berserk - Vol. 2 Ch. 7-9", Some("7")),
+            ("1692os", "Berserk - Oneshot", None),
         ] {
             let (code, body, _) = get_json(&format!("{base}/book/{id}"), None).await;
             assert_eq!(
@@ -513,11 +552,11 @@ mod tests {
                     body["title"].as_str(),
                     body["series"][0]["sequence"].as_str()
                 ),
-                (200, Some(title), Some(sequence)),
+                (200, Some(title), sequence),
                 "lookup {id}"
             );
         }
-        for id in ["5", "abc", "..", &"9".repeat(13), "1692v", "1692v3v4", "1692vol", "1692v3vol2"] {
+        for id in ["5", "abc", "..", &"9".repeat(13), "1692v", "1692v3v4", "1692vol", "1692v3vol2", "1692v-6", "1692v0-", "1692osv3", "1692os3", "1692vol2os"] {
             let (code, _, _) = get_json(&format!("{base}/book/{id}"), None).await;
             assert_eq!(code, 404, "lookup {id}");
         }
