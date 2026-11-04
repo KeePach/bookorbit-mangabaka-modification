@@ -70,12 +70,20 @@ static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
     regex(r"(?i)(?:^|[\s\-:(\[_])(?:vol(?:ume|um)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,)\](\[_])")
 });
 static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:(\[_])(?:chap(?:ter|tr)?|chptr|ch|c#)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,)\](\[_])")
+    // "Ch. 8", "chapter8", "c#8", "c008", and a range of chapters with no spaces around the dash:
+    // "Ch. 0-6", "c000-006". Group 1 is the chapter, group 2 the end of a range.
+    regex(r"(?i)(?:^|[\s\-:(\[_])(?:(?:chap(?:ters?|tr)?|chptr|ch|c#)\.?\s*(?:#\s*)?|c)([0-9]{1,4}(?:\.[0-9]+)?)(?:[-\x{2013}\x{2014}~]([0-9]{1,4}(?:\.[0-9]+)?))?(?:$|[\s\-:,)\](\[_])")
 });
 static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\]"));
 static TRAILING_JUNK: LazyLock<Regex> =
     LazyLock::new(|| regex(r"[\s,.:;_\-\x{2013}\x{2014}(\[]+$"));
 static SPACES: LazyLock<Regex> = LazyLock::new(|| regex(r"\s+"));
+// "Oneshot", "One-shot", "one shot": a book with no volume or chapter number to put after its name.
+static ONESHOT: LazyLock<Regex> = LazyLock::new(|| {
+    regex(r"(?i)(?:^|[\s\-:(\[_])one[\s_\-]?shots?(?:$|[\s\-:,)\](\[_])")
+});
+/// What a oneshot's title carries after the series name, in place of a volume or chapter.
+pub const ONESHOT_LABEL: &str = "Oneshot";
 // A number left alone after a dash ("Title - 39"): what a title looks like once something has
 // stripped the "Ch." from "Title - Ch. 39".
 static BARE_NUMBER: LazyLock<Regex> =
@@ -179,12 +187,21 @@ pub fn split_volume(query: &str) -> (String, String) {
             .unwrap_or_default()
     };
     let volume = number(&volume_match);
-    let chapter = number(&chapter_match);
+    let chapter = chapter_match.as_ref().map(chapter_text).unwrap_or_default();
 
     // A title an earlier scrape left with only its number ("Title - 39") has lost its marker.
     // Read the number as the chapter, so scraping the same book again keeps it instead of
     // dropping it. A year is not a chapter.
     if volume.is_empty() && chapter.is_empty() {
+        // A oneshot has no number, so the word itself is what the title keeps. Like a marker, it
+        // ends the series name; a title that starts with it ("One Shot Kill") is just a title.
+        if let Some(found) = ONESHOT.find(query) {
+            let before = query[..found.start()].trim();
+            let cleaned = trim_title_prefix(&strip_title_suffix(before));
+            if !cleaned.is_empty() {
+                return (cleaned, ONESHOT_LABEL.to_string());
+            }
+        }
         let bare = BARE_NUMBER.captures(query).and_then(|captures| {
             let start = captures.get(0)?.start();
             let number = normalize_number(captures.get(1)?.as_str());
@@ -220,6 +237,22 @@ pub fn split_volume(query: &str) -> (String, String) {
     }
 }
 
+/// The chapter a match names: "8", or "0-6" for a range of chapters. A range that goes nowhere
+/// ("6-2", "3-3") is only its first chapter.
+fn chapter_text(captures: &regex::Captures) -> String {
+    let start = captures
+        .get(1)
+        .map(|found| normalize_number(found.as_str()))
+        .unwrap_or_default();
+    let end = captures.get(2).map(|found| normalize_number(found.as_str()));
+    match end {
+        Some(end) if end.parse::<f64>().unwrap_or(0.0) > start.parse::<f64>().unwrap_or(f64::MAX) => {
+            format!("{start}-{end}")
+        }
+        _ => start,
+    }
+}
+
 /// The label a title carries for a volume and/or a chapter: "Vol. 2 Ch. 8", "Ch. 8", "Vol. 2",
 /// or nothing.
 pub fn index_label(volume: &str, chapter: &str) -> String {
@@ -235,6 +268,9 @@ pub fn index_label(volume: &str, chapter: &str) -> String {
 /// a lookup by id can write the same title again: `v8` is chapter 8 (the form earlier ids have),
 /// `vol2` is volume 2, `vol2v8` is both.
 fn id_suffix(label: &str) -> String {
+    if label == ONESHOT_LABEL {
+        return "os".to_string();
+    }
     let (volume, chapter) = series_index_numbers(label);
     match (volume.is_empty(), chapter.is_empty()) {
         (true, true) => String::new(),
@@ -252,8 +288,7 @@ fn series_index_numbers(series_index: &str) -> (String, String) {
         .unwrap_or_default();
     let chapter = CHAPTER
         .captures(series_index)
-        .and_then(|captures| captures.get(1))
-        .map(|value| normalize_number(value.as_str()))
+        .map(|captures| chapter_text(&captures))
         .unwrap_or_default();
     (volume, chapter)
 }
@@ -261,7 +296,8 @@ fn series_index_numbers(series_index: &str) -> (String, String) {
 fn provider_index(series_index: &str) -> String {
     let (volume, chapter) = series_index_numbers(series_index);
     if !chapter.is_empty() {
-        chapter
+        // A range of chapters sits in the series at its first one: "0-6" is 0.
+        chapter.split('-').next().unwrap_or_default().to_string()
     } else {
         volume
     }
@@ -283,7 +319,7 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
     });
     let volume_number = series_index_numbers(volume).0;
     // The series' start says when volume 1 came out, not a later one.
-    let dated = volume.is_empty() || volume_number == "1";
+    let dated = volume.is_empty() || volume == ONESHOT_LABEL || volume_number == "1";
     let published_date = s
         .published
         .as_ref()
@@ -831,6 +867,60 @@ mod tests {
         // The series index stays the chapter, else the volume.
         assert_eq!(map_series(&series, "Vol. 2 Ch. 11").series[0].sequence, "11");
         assert_eq!(map_series(&series, "Vol. 3").series[0].sequence, "3");
+    }
+
+    #[test]
+    fn a_oneshot_keeps_its_name_in_the_title() {
+        let split = |query: &str| split_volume(query);
+        let to = |series: &str, label: &str| (series.to_string(), label.to_string());
+        assert_eq!(split("Series Oneshot"), to("Series", "Oneshot"));
+        assert_eq!(split("Series - One-Shot (en) [Group]"), to("Series", "Oneshot"));
+        assert_eq!(split("Series (One Shot)"), to("Series", "Oneshot"));
+        assert_eq!(split("Series one_shot"), to("Series", "Oneshot"));
+        // A chapter or volume wins, and a title that starts with the words is only a title.
+        assert_eq!(split("Series Ch. 3 Oneshot"), to("Series", "Ch. 3"));
+        assert_eq!(split("One Shot Kill"), to("One Shot Kill", ""));
+        assert_eq!(split("Oneshot"), to("Oneshot", ""));
+
+        // The title, the id and the lookup all keep it, and there is no series number.
+        let book = map_series(&load_series(SERIES_1692), "Oneshot");
+        assert_eq!(book.title, "Berserk - Oneshot");
+        assert_eq!(book.provider_id, "1692os");
+        assert_eq!(book.series[0].sequence, "");
+    }
+
+    #[test]
+    fn a_range_of_chapters_stays_in_the_title() {
+        let split = |query: &str| split_volume(query);
+        let to = |series: &str, label: &str| (series.to_string(), label.to_string());
+        assert_eq!(split("Series c000-006"), to("Series", "Ch. 0-6"));
+        assert_eq!(split("Series - Ch. 1-6"), to("Series", "Ch. 1-6"));
+        assert_eq!(split("Series Chapters 1\u{2013}6"), to("Series", "Ch. 1-6"));
+        assert_eq!(split("Series Vol. 2 Ch. 7-9"), to("Series", "Vol. 2 Ch. 7-9"));
+        assert_eq!(split("Series c5"), to("Series", "Ch. 5"));
+        // Not ranges: a spaced dash (a chapter title starting with a number), a range that goes
+        // backwards or nowhere.
+        assert_eq!(split("Series Ch. 12 - 100 Days"), to("Series", "Ch. 12"));
+        assert_eq!(split("Series Ch. 6-2"), to("Series", "Ch. 6"));
+        assert_eq!(split("Series Ch. 3-3"), to("Series", "Ch. 3"));
+
+        // The range is in the title and the id; the series position is its first chapter.
+        let book = map_series(&load_series(SERIES_1692), "Ch. 0-6");
+        assert_eq!(book.title, "Berserk - Ch. 0-6");
+        assert_eq!(book.provider_id, "1692v0-6");
+        assert_eq!(book.series[0].sequence, "0");
+    }
+
+    #[test]
+    fn display_title_follows_a_range_written_as_a_file_name() {
+        let series = Series {
+            title: Some("Series".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            display_title(&series, "Series", "Series c000-006", "Ch. 0-6"),
+            "Series - c000-006"
+        );
     }
 
     #[test]
