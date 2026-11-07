@@ -105,20 +105,34 @@ async fn search(
     // for, and the title only says which book of it this is: "chapter 1", "Vol. 2", "Oneshot", or
     // else the book's own series number. Without it, the series is read out of the title.
     let series = q.get("series").map(|v| v.trim()).filter(|v| !v.is_empty());
-    let (head, volume) = match series {
-        Some(series) => (
-            series.to_string(),
-            position_label(query, q.get("seriesIndex").map(|v| v.trim())),
-        ),
-        None => split_volume(query),
+    let (title_head, title_label) = split_volume(query);
+    let volume = match series {
+        Some(_) => position_label(query, q.get("seriesIndex").map(|v| v.trim())),
+        None => title_label.clone(),
     };
-    // What the series is matched and ordered by has no "(2010)" or "[group]" in it; the search
-    // itself tries the head with and without them (see `search_queries`).
-    let title = without_brackets(&head);
 
-    let found = match tokio::time::timeout(
+    // What is searched, in order: the series when BookOrbit gave one, then the title, which is only
+    // tried when the series found nothing. Each is paired with the name a result has to resemble,
+    // which has no "(2010)" or "[group]" in it (see `search_queries` for the wordings tried).
+    let mut attempts: Vec<(String, String)> = Vec::new();
+    if let Some(series) = series {
+        let name = without_brackets(series);
+        attempts.extend(search_queries(series).into_iter().map(|wording| (wording, name.clone())));
+    }
+    // A title that is only "chapter 1" names no series, so there is nothing to fall back to.
+    let title_names_a_series = !title_head.is_empty() && !(title_head == query && !title_label.is_empty());
+    if series.is_none() || title_names_a_series {
+        let name = without_brackets(&title_head);
+        let wordings = search_queries(&title_head);
+        let kept = if series.is_some() { 2 } else { wordings.len() };
+        attempts.extend(wordings.into_iter().take(kept).map(|wording| (wording, name.clone())));
+    }
+    let mut seen = std::collections::HashSet::new();
+    attempts.retain(|(wording, _)| seen.insert(wording.to_lowercase()));
+
+    let (found, title) = match tokio::time::timeout(
         REQUEST_TIMEOUT,
-        find_series(&state.mb, &head, &title, limit),
+        find_series(&state.mb, &attempts, limit),
     )
     .await
     {
@@ -156,21 +170,21 @@ async fn search(
 /// none of the series' names have.
 async fn find_series(
     mb: &Client,
-    head: &str,
-    title: &str,
+    attempts: &[(String, String)],
     limit: usize,
-) -> Result<Vec<Series>, UpstreamError> {
-    for wording in search_queries(head) {
-        let found = mb.search_series(&wording, limit).await?;
+) -> Result<(Vec<Series>, String), UpstreamError> {
+    for (wording, name) in attempts {
+        let found = mb.search_series(wording, limit).await?;
         let usable: Vec<Series> = found
             .into_iter()
-            .filter(|s| s.state == "active" && shares_a_word(s, title))
+            .filter(|s| s.state == "active" && shares_a_word(s, name))
             .collect();
         if !usable.is_empty() {
-            return Ok(usable);
+            // The name that found them is what they are ordered by.
+            return Ok((usable, name.clone()));
         }
     }
-    Ok(Vec::new())
+    Ok((Vec::new(), String::new()))
 }
 
 async fn lookup(
@@ -472,6 +486,36 @@ mod tests {
         )
         .await;
         assert_eq!(body["matches"][0]["title"], "Berserk - Oneshot");
+    }
+
+    #[tokio::test]
+    async fn search_tries_the_series_first_and_the_title_after() {
+        let (base, _) = provider(None).await;
+        // The series finds nothing at MangaBaka (the fake answers only to "Berserk"), so the
+        // title is what is searched, and it still gives its chapter.
+        let (_, body, _) = get_json(
+            &format!("{base}/search?query=Berserk+Ch.+9&series=Nonexistent&mediaType=comic"),
+            None,
+        )
+        .await;
+        assert_eq!(body["matches"][0]["title"], "Berserk - Ch. 9");
+
+        // A title that is only "chapter 9" names no series: there is nothing to fall back to.
+        let (code, body, _) = get_json(
+            &format!("{base}/search?query=chapter+9&series=Nonexistent&mediaType=comic"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert!(body["matches"].as_array().unwrap().is_empty());
+
+        // The series wins over a title that names something else.
+        let (_, body, _) = get_json(
+            &format!("{base}/search?query=Something+Else+Ch.+4&series=Berserk&mediaType=comic"),
+            None,
+        )
+        .await;
+        assert_eq!(body["matches"][0]["title"], "Berserk - Ch. 4");
     }
 
     #[tokio::test]
