@@ -82,6 +82,14 @@ static SPACES: LazyLock<Regex> = LazyLock::new(|| regex(r"\s+"));
 static ONESHOT: LazyLock<Regex> = LazyLock::new(|| {
     regex(r"(?i)(?:^|[\s\-:(\[_])one[\s_\-]?shots?(?:$|[\s\-:,)\](\[_])")
 });
+// A series number on its own ("12", "0-6", "10.5"): what BookOrbit has for a book whose file is
+// just "chapter 12", as the folder gives the series.
+static INDEX_ONLY: LazyLock<Regex> = LazyLock::new(|| {
+    regex(r"^\s*([0-9]{1,4}(?:\.[0-9]+)?)(?:[-\x{2013}\x{2014}~]([0-9]{1,4}(?:\.[0-9]+)?))?\s*$")
+});
+// A title that is only the word: "Oneshot", "(One-Shot)".
+static ONESHOT_ONLY: LazyLock<Regex> =
+    LazyLock::new(|| regex(r"(?i)^\W*one[\s_\-]?shots?\W*$"));
 /// What a oneshot's title carries after the series name, in place of a volume or chapter.
 pub const ONESHOT_LABEL: &str = "Oneshot";
 // A number left alone after a dash ("Title - 39"): what a title looks like once something has
@@ -251,6 +259,24 @@ fn chapter_text(captures: &regex::Captures) -> String {
         }
         _ => start,
     }
+}
+
+/// Which volume, chapter or oneshot of a series a book is, for when BookOrbit says what the series
+/// is (from the folder) and the title only has to say which book of it this is: whatever the
+/// title names ("chapter 1", "Vol. 2", "Oneshot"), else the book's own series number read as a
+/// chapter. Empty when neither says.
+pub fn position_label(title: &str, series_index: Option<&str>) -> String {
+    let (_, label) = split_volume(title);
+    if !label.is_empty() {
+        return label;
+    }
+    if ONESHOT_ONLY.is_match(title) {
+        return ONESHOT_LABEL.to_string();
+    }
+    series_index
+        .and_then(|index| INDEX_ONLY.captures(index))
+        .map(|captures| index_label("", &chapter_text(&captures)))
+        .unwrap_or_default()
 }
 
 /// The label a title carries for a volume and/or a chapter: "Vol. 2 Ch. 8", "Ch. 8", "Vol. 2",
@@ -474,17 +500,20 @@ pub fn display_title(s: &Series, head: &str, query: &str, volume: &str) -> Strin
     let tail = query_tail(query);
     let label = if tail.is_empty() { volume } else { tail.as_str() };
     let display = if label.is_empty() {
-        best
+        best.clone()
     } else {
         format!("{best} - {label}")
     };
-    // Words in front of the title ("[Translator](Author) Series (English) Ch 12") are in the query
-    // but in no name of the series. When the rebuilt title still would not read as a match, the
-    // query itself is what scores as one.
     if reads_as_match(query, &display) {
         display
-    } else {
+    } else if contains_words(&title_words(query), &title_words(&best)) {
+        // Words in front of the title ("[Translator](Author) Series (English) Ch 12") are in the
+        // query but in no name of the series: the query itself is what scores as a match.
         query.to_string()
+    } else {
+        // The query does not name the series at all (a bare "chapter 1" in a series' folder): the
+        // name goes in front, and the query is inside it.
+        format!("{best} - {query}")
     }
 }
 
@@ -867,6 +896,31 @@ mod tests {
         // The series index stays the chapter, else the volume.
         assert_eq!(map_series(&series, "Vol. 2 Ch. 11").series[0].sequence, "11");
         assert_eq!(map_series(&series, "Vol. 3").series[0].sequence, "3");
+    }
+
+    #[test]
+    fn the_position_comes_from_the_title_or_else_the_series_number() {
+        assert_eq!(position_label("chapter 1", None), "Ch. 1");
+        assert_eq!(position_label("Vol. 3", Some("9")), "Vol. 3");
+        assert_eq!(position_label("Oneshot", None), "Oneshot");
+        assert_eq!(position_label("Something", Some("12")), "Ch. 12");
+        assert_eq!(position_label("Something", Some("0-6")), "Ch. 0-6");
+        assert_eq!(position_label("Something", Some("10.50")), "Ch. 10.5");
+        assert_eq!(position_label("Something", Some("abc")), "");
+        assert_eq!(position_label("Something", None), "");
+    }
+
+    #[test]
+    fn display_title_names_the_series_when_the_title_does_not() {
+        let series = Series {
+            title: Some("Series".into()),
+            ..Default::default()
+        };
+        // A file that is only "chapter 1" in the series' folder.
+        assert_eq!(
+            display_title(&series, "Series", "chapter 1", "Ch. 1"),
+            "Series - chapter 1"
+        );
     }
 
     #[test]
