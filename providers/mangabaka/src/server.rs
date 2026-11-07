@@ -12,8 +12,9 @@ use serde_json::json;
 
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
-    author_matches, display_title, index_label, map_series, names_exactly, search_queries,
-    shared_words, shares_a_word, split_volume, without_brackets, BookMetadata, ONESHOT_LABEL,
+    author_matches, display_title, index_label, map_series, names_exactly, position_label,
+    search_queries, shared_words, shares_a_word, split_volume, without_brackets, BookMetadata,
+    ONESHOT_LABEL,
 };
 use crate::{Config, VERSION};
 
@@ -64,7 +65,9 @@ async fn info(State(state): State<AppState>) -> Response {
             "title", "description", "cover", "authors", "publisher", "publishedYear", "language",
             "seriesName", "seriesIndex", "genres", "communityRating"
         ],
-        "searchParams": ["limit"],
+        // `series` and `seriesIndex` are what BookOrbit knows of a book from its folder and file
+        // number. A BookOrbit that does not send them is unaffected.
+        "searchParams": ["limit", "series", "seriesIndex"],
         "idMaxLength": MAX_ID_LENGTH,
         // A volume's id is not a page, so the template points at this provider's own `/open/{id}`,
         // which sends the browser on to the series' page. Only declared when `PUBLIC_URL` says
@@ -98,7 +101,17 @@ async fn search(
         .get("limit")
         .and_then(|v| v.parse::<usize>().ok())
         .map_or(DEFAULT_LIMIT, |n| n.clamp(1, MAX_LIMIT));
-    let (head, volume) = split_volume(query);
+    // When BookOrbit says which series the book is in (from its folder), that is what is searched
+    // for, and the title only says which book of it this is: "chapter 1", "Vol. 2", "Oneshot", or
+    // else the book's own series number. Without it, the series is read out of the title.
+    let series = q.get("series").map(|v| v.trim()).filter(|v| !v.is_empty());
+    let (head, volume) = match series {
+        Some(series) => (
+            series.to_string(),
+            position_label(query, q.get("seriesIndex").map(|v| v.trim())),
+        ),
+        None => split_volume(query),
+    };
     // What the series is matched and ordered by has no "(2010)" or "[group]" in it; the search
     // itself tries the head with and without them (see `search_queries`).
     let title = without_brackets(&head);
@@ -427,6 +440,38 @@ mod tests {
         assert_eq!(matches.len(), 5);
         assert_eq!(matches[0]["providerId"], "1692vol3");
         assert_eq!(matches[0]["series"][0]["sequence"], "3");
+    }
+
+    #[tokio::test]
+    async fn search_uses_the_series_from_bookorbit_when_the_title_is_bare() {
+        let (base, _) = provider(None).await;
+        // The file is only "chapter 9" in the folder "Berserk"; the fake answers only to "Berserk".
+        let (code, body, _) = get_json(
+            &format!("{base}/search?query=chapter+9&series=Berserk&seriesIndex=9&mediaType=comic"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200);
+        let matches = body["matches"].as_array().unwrap();
+        assert_eq!(matches[0]["title"], "Berserk - Ch. 9");
+        assert_eq!(matches[0]["providerId"], "1692v9");
+        assert_eq!(matches[0]["series"][0]["sequence"], "9");
+        // Shown to BookOrbit's relevance check as a title that holds the query.
+        assert_eq!(matches[0]["displayTitle"], "Berserk - chapter 9");
+
+        // A title with no number at all takes it from the series number; a oneshot stays one.
+        let (_, body, _) = get_json(
+            &format!("{base}/search?query=Extras&series=Berserk&seriesIndex=12&mediaType=comic"),
+            None,
+        )
+        .await;
+        assert_eq!(body["matches"][0]["title"], "Berserk - Ch. 12");
+        let (_, body, _) = get_json(
+            &format!("{base}/search?query=Oneshot&series=Berserk&mediaType=comic"),
+            None,
+        )
+        .await;
+        assert_eq!(body["matches"][0]["title"], "Berserk - Oneshot");
     }
 
     #[tokio::test]
