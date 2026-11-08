@@ -63,7 +63,7 @@ async fn info(State(state): State<AppState>) -> Response {
         "lookup": true,
         "supportedFields": [
             "title", "description", "cover", "authors", "publisher", "publishedYear", "language",
-            "seriesName", "seriesIndex", "genres", "communityRating"
+            "seriesName", "seriesIndex", "genres", "tags", "communityRating"
         ],
         // `series` and `seriesIndex` are what BookOrbit knows of a book from its folder and file
         // number. A BookOrbit that does not send them is unaffected.
@@ -406,6 +406,15 @@ mod tests {
             (Some("mangabaka"), Some(true), Some(false))
         );
         assert_eq!(body["rateLimit"]["minIntervalMs"], 2000);
+        // BookOrbit lists a provider for a field rule only when it declares the field, so tags
+        // have to be here for the Tags rule to use this provider.
+        let fields: Vec<&str> = body["supportedFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|field| field.as_str())
+            .collect();
+        assert!(fields.contains(&"genres") && fields.contains(&"tags"));
         assert_eq!(
             (body["avatarUrl"].as_str(), body["color"].as_str()),
             (
