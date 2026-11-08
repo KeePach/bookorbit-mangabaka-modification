@@ -1230,6 +1230,23 @@ mod tests {
     }
 
     #[test]
+    fn tags_stay_apart_from_genres() {
+        let series = Series {
+            genres: Some(vec!["school_life".into(), "action".into()]),
+            tags: Some(vec![" Isekai ".into(), "Magic".into(), "isekai".into(), "".into()]),
+            ..Series::default()
+        };
+        let book = map_series(&series, "");
+        assert_eq!(book.genres, ["School Life", "Action"]);
+        assert_eq!(book.tags, ["Isekai", "Magic"]);
+        let json = serde_json::to_value(&book).unwrap();
+        assert_eq!(json["tags"], serde_json::json!(["Isekai", "Magic"]));
+        assert_eq!(json["genres"], serde_json::json!(["School Life", "Action"]));
+        // A series with no tags leaves the key out, as the other lists do.
+        assert!(serde_json::to_value(map_series(&Series::default(), "")).unwrap()["tags"].is_null());
+    }
+
+    #[test]
     fn matches_authors_in_any_order() {
         let s = load_series(SERIES_1692);
         assert!(author_matches(&s, "Kentaro Miura"));
