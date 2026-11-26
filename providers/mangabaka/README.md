@@ -21,6 +21,10 @@ Titles and series names are always returned in English.
   all work.
 - **Shorter retries.** A search that finds nothing is retried: without a trailing edition word
   (`the Comic`, `Manga`, `(Light Novel)`), then with the first half of the title.
+- **Edition tag.** When MangaBaka has a series both as a comic and as a novel under the same name,
+  both are tagged so BookOrbit files them as two series: `Solo Leveling (Manhwa) - Vol. 3` and
+  `Solo Leveling (Novel) - Vol. 3` (`(Manga)`, `(Manhwa)`, `(Manhua)` or `(Novel)` by MangaBaka's
+  type). BookOrbit still matches against the untagged title, sent as the display title.
 - **Better ordering.** Results are ordered by author match, exact name, then most shared words.
 - **`displayTitle`.** When another name of the series (romanized or native) fits the query better than the
   English title, it is sent as `displayTitle`. `title` and the series stay English. This needs a BookOrbit

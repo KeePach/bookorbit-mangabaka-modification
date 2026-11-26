@@ -409,30 +409,32 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
     }
 }
 
-/// The word a comic is tagged with when MangaBaka also has a novel of the same name: "Solo Leveling
-/// (Manhwa)", "That Time I Got Reincarnated as a Slime (Manga)".
+/// The word a series is tagged with when MangaBaka has it both as a comic and as a novel of the
+/// same name: "Solo Leveling (Manhwa)" and "Solo Leveling (Novel)".
 pub fn edition_tag(kind: Option<&str>) -> &'static str {
     match kind {
+        Some("novel") => "Novel",
         Some("manhwa") => "Manhwa",
         Some("manhua") => "Manhua",
         _ => "Manga",
     }
 }
 
-/// Whether `s` is a comic and `others` holds a novel of the same name: two versions of one story,
-/// which BookOrbit would file as one series unless their names differ.
-pub fn has_novel_namesake(s: &Series, others: &[Series]) -> bool {
+/// Whether `others` holds the other version of `s` under the same name: a novel for a comic, a
+/// comic for a novel. Two versions of one story, which BookOrbit would file as one series unless
+/// their names differ.
+pub fn has_other_version(s: &Series, others: &[Series]) -> bool {
     let name = |series: &Series| title_words(&tidy_title(&english_title(series))).join(" ");
+    let novel = |series: &Series| series.kind.as_deref() == Some("novel");
     let own = name(s);
-    s.kind.as_deref() != Some("novel")
-        && !own.is_empty()
+    !own.is_empty()
         && others
             .iter()
-            .any(|o| o.id != s.id && o.kind.as_deref() == Some("novel") && name(o) == own)
+            .any(|o| o.id != s.id && novel(o) != novel(s) && name(o) == own)
 }
 
 /// Puts the edition after the series' name, in the series and in the title: "Solo Leveling
-/// (Manhwa) - Vol. 3". BookOrbit still compares the search against the untagged title, sent as the
+/// (Manhwa) - Vol. 3", "Solo Leveling (Novel) - Vol. 3". BookOrbit still compares the search against the untagged title, sent as the
 /// display title, so the tag changes no match. A name that already ends in such a word ("Cirque du
 /// Freak: The Manga") is left as it is.
 pub fn tag_edition(book: &mut BookMetadata, tag: &str) {
@@ -441,7 +443,9 @@ pub fn tag_edition(book: &mut BookMetadata, tag: &str) {
     };
     let name = entry.series.clone();
     let last = title_words(&name).pop().unwrap_or_default();
-    if ["manga", "manhwa", "manhua", "comic", "comics", "webtoon"].contains(&last.as_str()) {
+    if ["manga", "manhwa", "manhua", "comic", "comics", "webtoon", "novel", "novels"]
+        .contains(&last.as_str())
+    {
         return;
     }
     let tagged = format!("{name} ({tag})");

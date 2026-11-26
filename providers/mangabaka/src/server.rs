@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
-    author_matches, display_title, edition_tag, has_novel_namesake, tag_edition, index_label, map_series, names_exactly, position_label,
+    author_matches, display_title, edition_tag, has_other_version, tag_edition, index_label, map_series, names_exactly, position_label,
     search_queries, shared_words, shares_a_word, split_volume, without_brackets, BookMetadata,
     ONESHOT_LABEL,
 };
@@ -159,7 +159,7 @@ async fn search(
         .map(|s| {
             let mut book = map_series(s, &volume);
             book.display_title = display_title(s, &title, query, &volume);
-            if has_novel_namesake(s, &found) {
+            if has_other_version(s, &found) {
                 tag_edition(&mut book, edition_tag(s.kind.as_deref()));
             }
             book
@@ -223,17 +223,15 @@ async fn lookup(
     match result {
         Ok(found) if found.state == "active" => {
             let mut book = map_series(&found, &volume);
-            // The search tags a comic that has a novel of the same name, so a lookup looks for one
-            // too; otherwise refreshing a book by its id would take the tag away again. A failed
-            // look leaves the record untagged rather than failing it.
-            if found.kind.as_deref() != Some("novel") {
-                let name = book.series.first().map(|s| s.series.clone()).unwrap_or_default();
-                if let Ok(Ok(namesakes)) =
-                    tokio::time::timeout(REQUEST_TIMEOUT, state.mb.search_series(&name, 10)).await
-                {
-                    if has_novel_namesake(&found, &namesakes) {
-                        tag_edition(&mut book, edition_tag(found.kind.as_deref()));
-                    }
+            // The search tags a series that MangaBaka also has in the other version under the same
+            // name, so a lookup looks for one too; otherwise refreshing a book by its id would take
+            // the tag away again. A failed look leaves the record untagged rather than failing it.
+            let name = book.series.first().map(|s| s.series.clone()).unwrap_or_default();
+            if let Ok(Ok(namesakes)) =
+                tokio::time::timeout(REQUEST_TIMEOUT, state.mb.search_series(&name, 10)).await
+            {
+                if has_other_version(&found, &namesakes) {
+                    tag_edition(&mut book, edition_tag(found.kind.as_deref()));
                 }
             }
             Json(book).into_response()
@@ -738,7 +736,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_comic_with_a_novel_of_the_same_name_is_tagged() {
+    async fn a_comic_and_its_novel_of_the_same_name_are_both_tagged() {
         let (base, _) = provider(None).await;
         let (code, body, _) =
             get_json(&format!("{base}/search?query=Solo+Leveling+Vol.+3"), None).await;
@@ -758,10 +756,11 @@ mod tests {
         assert_eq!(manhwa["series"][0]["series"], "Solo Leveling (Manhwa)");
         assert_eq!(manhwa["displayTitle"], "Solo Leveling - Vol. 3");
         let novel = by_id("85266vol3");
-        assert_eq!(novel["title"], "Solo Leveling - Vol. 3");
-        assert_eq!(novel["series"][0]["series"], "Solo Leveling");
-        assert!(novel.get("displayTitle").is_none());
+        assert_eq!(novel["title"], "Solo Leveling (Novel) - Vol. 3");
+        assert_eq!(novel["series"][0]["series"], "Solo Leveling (Novel)");
+        assert_eq!(novel["displayTitle"], "Solo Leveling - Vol. 3");
         assert_eq!(by_id("1252vol3")["series"][0]["series"], "Solo Leveling: Ragnarok (Manhwa)");
+        assert_eq!(by_id("85267vol3")["series"][0]["series"], "Solo Leveling: Ragnarok (Novel)");
         // A manhua with no novel of its name stays as it is.
         let other = by_id("3368vol3");
         assert!(!other["title"].as_str().unwrap().contains('('));
