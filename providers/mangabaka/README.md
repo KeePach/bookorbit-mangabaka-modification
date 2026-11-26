@@ -21,7 +21,9 @@ Titles and series names are always returned in English.
   all work.
 - **Shorter retries.** A search that finds nothing is retried: without a trailing edition word
   (`the Comic`, `Manga`, `(Light Novel)`), then with the first half of the title.
-- **Better ordering.** Results are ordered by author match, exact name, then most shared words.
+- **Better ordering.** Results are ordered by the library's kind first (a book library gets novels,
+  a comic library manga, manhwa and manhua; the other kind still follows), then author match,
+  exact name, then most shared words.
 - **`displayTitle`.** When another name of the series (romanized or native) fits the query better than the
   English title, it is sent as `displayTitle`. `title` and the series stay English. This needs a BookOrbit
   build that reads `displayTitle` (see the BookOrbit fork below); other builds ignore it.

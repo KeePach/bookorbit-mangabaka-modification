@@ -775,6 +775,17 @@ fn unique(list: &[String]) -> Vec<String> {
 /// True when every word of the asked-for author is in one of the series' names, in any order:
 /// MangaBaka writes "MIURA Kentaro" where a file says "Kentaro Miura". A name that differs only
 /// in its separators matches too: "Chu-Gong" is "Chugong".
+/// Whether a series is the kind of book the library holds: a novel for a book library, anything
+/// else (manga, manhwa, manhua) for a comic library. Any kind fits when the library says nothing.
+pub fn fits_media_type(s: &Series, media_type: &str) -> bool {
+    let novel = s.kind.as_deref() == Some("novel");
+    match media_type {
+        "book" => novel,
+        "comic" => !novel,
+        _ => true,
+    }
+}
+
 pub fn author_matches(s: &Series, author: &str) -> bool {
     let wanted = name_words(author);
     if wanted.is_empty() {
