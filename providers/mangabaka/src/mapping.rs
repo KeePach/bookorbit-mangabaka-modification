@@ -69,12 +69,17 @@ fn regex(pattern: &str) -> Regex {
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
     // "Vol. 3", "v03", and a range of volumes with no spaces around the dash: "Vol. 9-10",
     // "Vols. 1-3". Group 1 is the volume, group 2 the end of a range.
-    regex(r"(?i)(?:^|[\s\-:(\[_])(?:vol(?:umes?|ums?|s)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:[-\x{2013}\x{2014}~]([0-9]{1,4}(?:\.[0-9]+)?))?(?:$|[\s\-:,)\](\[_])")
+    regex(r"(?i)(?:^|[\s\-:(\[_.])(?:vol(?:umes?|ums?|s)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:[-\x{2013}\x{2014}~]([0-9]{1,4}(?:\.[0-9]+)?))?(?:$|[\s\-:,)\](\[_.])")
 });
 static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
     // "Ch. 8", "chapter8", "c#8", "c008", and a range of chapters with no spaces around the dash:
     // "Ch. 0-6", "c000-006". Group 1 is the chapter, group 2 the end of a range.
-    regex(r"(?i)(?:^|[\s\-:(\[_])(?:(?:chap(?:ters?|tr)?|chptr|ch|c#)\.?\s*(?:#\s*)?|c)([0-9]{1,4}(?:\.[0-9]+)?)(?:[-\x{2013}\x{2014}~]([0-9]{1,4}(?:\.[0-9]+)?))?(?:$|[\s\-:,)\](\[_])")
+    regex(r"(?i)(?:^|[\s\-:(\[_.])(?:(?:chap(?:ters?|tr)?|chptr|ch|c#)\.?\s*(?:#\s*)?|c)([0-9]{1,4}(?:\.[0-9]+)?)(?:[-\x{2013}\x{2014}~]([0-9]{1,4}(?:\.[0-9]+)?))?(?:$|[\s\-:,)\](\[_.])")
+});
+// A chapter marker written straight after a volume, with no space or only a dot between them:
+// "v04c05", "v4.c5", "Vol.2Ch.8". Group 1 is the volume part, group 2 the start of the chapter.
+static GLUED_CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
+    regex(r"(?i)((?:^|[\s\-:(\[_.])(?:vol(?:umes?|ums?|s)?|vl|v)\.?\s*(?:#\s*)?[0-9]{1,4}(?:\.[0-9]+)?(?:[-\x{2013}\x{2014}~][0-9]{1,4}(?:\.[0-9]+)?)?)\.?((?:chap(?:ters?|tr)?|chptr|ch|c#|c)\.?\s*(?:#\s*)?[0-9])")
 });
 static EMPTY_BRACKETS: LazyLock<Regex> = LazyLock::new(|| regex(r"\(\s*\)|\[\s*\]"));
 static TRAILING_JUNK: LazyLock<Regex> =
@@ -186,7 +191,8 @@ fn remove_match(text: &str, pattern: &Regex) -> String {
 /// the language, the scanlation group) is not part of the series name and would only make the
 /// search come back empty. When the marker leads ("Vol. 3 Berserk"), the rest is the title.
 pub fn split_volume(query: &str) -> (String, String) {
-    let query = query.trim();
+    let query = separate_markers(query.trim());
+    let query = query.as_str();
     let volume_match = VOLUME.captures(query);
     let chapter_match = CHAPTER.captures(query);
     let volume = volume_match.as_ref().map(range_text).unwrap_or_default();
@@ -238,6 +244,12 @@ pub fn split_volume(query: &str) -> (String, String) {
     } else {
         (cleaned, normalized)
     }
+}
+
+/// Puts a space between a volume and a chapter written together ("v04c05" is "v04 c05", "v4.c5"
+/// is "v4 c5"), so both markers are read.
+fn separate_markers(query: &str) -> String {
+    GLUED_CHAPTER.replace_all(query, "$1 $2").into_owned()
 }
 
 /// The volume or chapter a match names: "8", or "0-6" for a range ("Vol. 9-10", "Ch. 0-6"). A
@@ -435,7 +447,8 @@ fn contains_words(haystack: &[String], needle: &[String]) -> bool {
 /// The part of a query from its first volume/chapter marker on, as written: "Vol.01 Ch.0002 -
 /// Chapter name (en) [group]". Empty when there is no marker, or when the query starts with it.
 pub fn query_tail(query: &str) -> String {
-    let query = query.trim();
+    let query = separate_markers(query.trim());
+    let query = query.as_str();
     let start = [&VOLUME, &CHAPTER]
         .into_iter()
         .filter_map(|pattern| pattern.find(query))
@@ -865,6 +878,41 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn reads_markers_with_no_dash_before_them() {
+        let series = load_series(SERIES_1692);
+        // The chapter, when there is one, is always the series index.
+        let cases = [
+            ("Blue Exorcist c05", "Ch. 5", "5"),
+            ("Blue Exorcist v04", "Vol. 4", "4"),
+            ("Blue Exorcist v04 c05", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist c05 v04", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist vol04 ch05", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist Vol. 4 Chapter 5", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist volume 4 chapter 5", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist Volume04", "Vol. 4", "4"),
+            ("Blue Exorcist chapter05", "Ch. 5", "5"),
+            ("Blue Exorcist v04c05", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist Vol.4Ch.5", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist v4.c5", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist v10.5c3", "Vol. 10.5 Ch. 3", "3"),
+            ("Blue Exorcist v04c05-07", "Vol. 4 Ch. 5-7", "5"),
+            ("Blue Exorcist.v04.c05", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist_v04_c05", "Vol. 4 Ch. 5", "5"),
+            ("Blue Exorcist v04 c05 (2011) [group]", "Vol. 4 Ch. 5", "5"),
+        ];
+        for (query, label, index) in cases {
+            let (title, found) = split_volume(query);
+            let sequence = map_series(&series, &found).series[0].sequence.clone();
+            assert_eq!(
+                (title.as_str(), found.as_str(), sequence.as_str()),
+                ("Blue Exorcist", label, index),
+                "{query}"
+            );
+        }
+        assert_eq!(query_tail("Blue Exorcist v04c05"), "v04 c05");
     }
 
     #[test]

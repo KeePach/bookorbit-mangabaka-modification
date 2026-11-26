@@ -15,7 +15,10 @@ Titles and series names are always returned in English.
   and the id; the series index is its first number.
 - **Number cleanup.** Leading zeros go (`Ch.0006` becomes `6`), and so do meaningless trailing decimal
   zeros (`12.50` becomes `12.5`).
-- **Wider marker detection.** `(`, `[` and `_` around the number are accepted (`Series (Vol 2)`).
+- **Wider marker detection.** No dash is needed before a marker (`Blue Exorcist c05`, `v04 c05`), and
+  `(`, `[`, `_` and `.` around it are accepted (`Series (Vol 2)`, `Series.v04.c05`). A chapter written
+  straight after its volume is read too (`v04c05`, `v4.c5`). `v`/`vol`/`volume` and `c`/`ch`/`chapter`
+  all work.
 - **Shorter retries.** A search that finds nothing is retried: without a trailing edition word
   (`the Comic`, `Manga`, `(Light Novel)`), then with the first half of the title.
 - **Better ordering.** Results are ordered by author match, exact name, then most shared words.
