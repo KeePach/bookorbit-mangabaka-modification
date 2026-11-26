@@ -95,7 +95,6 @@ struct Wanted {
     volume: String,
     chapter: String,
     author: String,
-    media_type: String,
 }
 
 impl Wanted {
@@ -133,15 +132,6 @@ impl Wanted {
             volume,
             chapter,
             author: param("author").to_string(),
-            media_type: param("mediaType").to_string(),
-        }
-    }
-
-    fn fits_format(&self, format: Format) -> bool {
-        match self.media_type.as_str() {
-            "comic" => matches!(format, Format::Manga | Format::Webtoon),
-            "book" => matches!(format, Format::Novel | Format::Unknown),
-            _ => true,
         }
     }
 }
@@ -180,7 +170,6 @@ async fn search(
 
 struct Found {
     book: BookMetadata,
-    fits_format: bool,
     by_author: bool,
     /// 2 the asked-for volume/chapter itself, 1 a volume holding it, 0 the series.
     item_fit: u8,
@@ -236,7 +225,6 @@ async fn find(
             };
             found.push(Found {
                 by_author: author_matches(&book.authors, &wanted.author),
-                fits_format: wanted.fits_format(series.format),
                 book,
                 item_fit,
                 exact: candidate.exact,
@@ -266,7 +254,6 @@ async fn find(
                         if fit > 0 {
                             found.push(Found {
                                 book: map_item(&item, None, &wanted.label),
-                                fits_format: wanted.fits_format(item.format),
                                 by_author: author_matches(&item.authors, &wanted.author),
                                 item_fit: fit,
                                 exact: true,
@@ -294,11 +281,13 @@ async fn find(
             return Err(err);
         }
     }
-    // The library's format first, then the asked-for author, then the asked-for volume or chapter
-    // itself, then a series named exactly as asked, then the closest name.
+    // The asked-for author first, then the asked-for volume or chapter itself, then a series named
+    // exactly as asked, then the closest name. A manga and its novel of the same name both come
+    // back, each with its own media type: BookOrbit picks by the book's file (a CBZ prefers the
+    // manga, an EPUB the novel). Its `mediaType` parameter says nothing here, being `book` for
+    // every book that is not an audiobook.
     found.sort_by_key(|f| {
         (
-            !f.fits_format,
             !f.by_author,
             Reverse(f.item_fit),
             !f.exact,
@@ -742,7 +731,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_book_library_gets_the_novel_first() {
+    async fn a_manga_and_its_novel_both_come_back_labelled() {
         let (base, _) = provider(None).await;
         let (_, body) = search(
             &base,
@@ -752,8 +741,14 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(body["matches"][0]["mediaType"], "book");
-        assert_eq!(body["matches"][1]["mediaType"], "comic");
+        let mut kinds: Vec<&str> = body["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["mediaType"].as_str().unwrap())
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, ["book", "comic"]);
     }
 
     #[tokio::test]

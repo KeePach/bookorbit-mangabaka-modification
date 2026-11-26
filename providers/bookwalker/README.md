@@ -68,8 +68,9 @@ use: `docker exec bookorbit-app wget -qO- --post-data= http://bookwalker:8080/ca
   volumes only), the volume holding it is used if the file name says the volume
   (`Blue Exorcist v05 c38` → volume 5, titled `Blue Exorcist - Vol. 5 Ch. 38`), else the series
   itself, still titled with the chapter (`Blue Exorcist - Ch. 5`).
-- A manga and its novel often share a name. The library's media type decides which comes first
-  (comic → manga and webtoons, book → novels).
+- A manga and its novel often share a name. Both come back, each labelled with its own media type
+  (manga and webtoons `comic`, novels `book`), and BookOrbit picks by the book's file: a CBZ or CBR
+  prefers the manga, an EPUB the novel.
 
 ## Mapping
 
