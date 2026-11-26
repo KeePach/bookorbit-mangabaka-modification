@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
-    author_matches, fits_media_type, display_title, index_label, map_series, names_exactly, position_label,
+    author_matches, display_title, index_label, map_series, names_exactly, position_label,
     search_queries, shared_words, shares_a_word, split_volume, without_brackets, BookMetadata,
     ONESHOT_LABEL,
 };
@@ -143,15 +143,12 @@ async fn search(
     };
 
     let author = q.get("author").map(|v| v.trim()).unwrap_or_default();
-    let media_type = q.get("mediaType").map(|v| v.trim()).unwrap_or_default();
     let mut active: Vec<&Series> = found.iter().collect();
-    // The library's kind first (a book library gets the novel, a comic library the manga, manhwa
-    // or manhua: "Solo Leveling" is both), then the asked-for author's series, then one named
-    // exactly as asked, then the one sharing the most words with the query, otherwise MangaBaka's
-    // own order: "Spy x Family" is the series, not the "Spy x Family: Family Portrait" novel.
+    // The asked-for author's series first, then one named exactly as asked, then the one sharing
+    // the most words with the query, otherwise MangaBaka's own order: "Spy x Family" is the
+    // series, not the "Spy x Family: Family Portrait" novel.
     active.sort_by_key(|s| {
         (
-            !fits_media_type(s, media_type),
             !author_matches(s, author),
             !names_exactly(s, &title),
             std::cmp::Reverse(shared_words(s, &title)),
@@ -322,12 +319,10 @@ mod tests {
                     move |Query(q): Query<HashMap<String, String>>| async move {
                         fixture(
                             &status,
-                            match q.get("q").map(String::as_str) {
-                                Some("Berserk") => include_str!("../testdata/search-berserk.json"),
-                                Some("Solo Leveling") => {
-                                    include_str!("../testdata/search-solo-leveling.json")
-                                }
-                                _ => include_str!("../testdata/search-empty.json"),
+                            if q.get("q").map(String::as_str) == Some("Berserk") {
+                                include_str!("../testdata/search-berserk.json")
+                            } else {
+                                include_str!("../testdata/search-empty.json")
                             },
                         )
                     }
@@ -460,7 +455,7 @@ mod tests {
     async fn search_strips_the_volume_and_puts_it_on_the_series() {
         let (base, _) = provider(None).await;
         let (code, body, _) = get_json(
-            &format!("{base}/search?query=Berserk+Vol.+3&mediaType=comic"),
+            &format!("{base}/search?query=Berserk+Vol.+3&mediaType=book"),
             None,
         )
         .await;
@@ -469,13 +464,6 @@ mod tests {
         assert_eq!(matches.len(), 5);
         assert_eq!(matches[0]["providerId"], "1692vol3");
         assert_eq!(matches[0]["series"][0]["sequence"], "3");
-        // A book library gets the novel first.
-        let (_, body, _) = get_json(
-            &format!("{base}/search?query=Berserk+Vol.+3&mediaType=book"),
-            None,
-        )
-        .await;
-        assert_eq!(body["matches"][0]["providerId"], "82960vol3");
     }
 
     #[tokio::test]
@@ -725,33 +713,5 @@ mod tests {
             pacer.wait().await,
             Err(UpstreamError::RateLimited { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn the_library_kind_comes_first() {
-        let (base, _) = provider(None).await;
-        let kinds = |body: &serde_json::Value| -> Vec<String> {
-            body["matches"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|m| m["mediaType"].as_str().unwrap().to_string())
-                .collect()
-        };
-        // "Solo Leveling" is both a manhwa and a novel of the same name. Every series of the
-        // library's kind comes first, and the other kind is still offered after them.
-        let (_, body, _) = get_json(
-            &format!("{base}/search?query=Solo+Leveling+Vol.+3&mediaType=book"),
-            None,
-        )
-        .await;
-        assert_eq!(kinds(&body), ["book", "book", "comic", "comic", "comic"]);
-        assert_eq!(body["matches"][0]["title"], "Solo Leveling - Vol. 3");
-        let (_, body, _) = get_json(
-            &format!("{base}/search?query=Solo+Leveling+Vol.+3&mediaType=comic"),
-            None,
-        )
-        .await;
-        assert_eq!(kinds(&body), ["comic", "comic", "comic", "book", "book"]);
     }
 }
