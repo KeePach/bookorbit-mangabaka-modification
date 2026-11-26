@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
-    author_matches, display_title, edition_tag, has_other_version, tag_edition, index_label, map_series, names_exactly, position_label,
+    author_matches, display_title, edition_tag, has_other_version, tag_edition, version_links, index_label, map_series, names_exactly, position_label,
     search_queries, shared_words, shares_a_word, split_volume, without_brackets, BookMetadata,
     ONESHOT_LABEL,
 };
@@ -21,6 +21,9 @@ use crate::{Config, VERSION};
 const DEFAULT_LIMIT: usize = 5;
 const MAX_LIMIT: usize = 20;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many linked series (a manga's novel and the like) a search reads, and for how long at most.
+const MAX_LINKED: usize = 8;
+const LINKED_TIMEOUT: Duration = Duration::from_secs(10);
 /// A series id, then `vol` and a volume (or a range of them) and/or `v` and a chapter (or a range):
 /// `1692`, `1692vol3`, `1692vol9-10`, `1692vol2v7-9`.
 const MAX_ID_LENGTH: usize = 32;
@@ -142,6 +145,9 @@ async fn search(
         Err(_) => return upstream_error("search", UpstreamError::Failed("timed out".into())),
     };
 
+    // A series' other version under another name is not among the results: it is read by id.
+    let linked = linked_versions(&state.mb, &found).await;
+
     let author = q.get("author").map(|v| v.trim()).unwrap_or_default();
     let mut active: Vec<&Series> = found.iter().collect();
     // The asked-for author's series first, then one named exactly as asked, then the one sharing
@@ -159,7 +165,7 @@ async fn search(
         .map(|s| {
             let mut book = map_series(s, &volume);
             book.display_title = display_title(s, &title, query, &volume);
-            if has_other_version(s, &found) {
+            if has_other_version(s, &found) || has_other_version(s, &linked) {
                 tag_edition(&mut book, edition_tag(s.kind.as_deref()));
             }
             book
@@ -227,18 +233,47 @@ async fn lookup(
             // name, so a lookup looks for one too; otherwise refreshing a book by its id would take
             // the tag away again. A failed look leaves the record untagged rather than failing it.
             let name = book.series.first().map(|s| s.series.clone()).unwrap_or_default();
-            if let Ok(Ok(namesakes)) =
-                tokio::time::timeout(REQUEST_TIMEOUT, state.mb.search_series(&name, 10)).await
+            let namesakes = match tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                state.mb.search_series(&name, 10),
+            )
+            .await
             {
-                if has_other_version(&found, &namesakes) {
-                    tag_edition(&mut book, edition_tag(found.kind.as_deref()));
-                }
+                Ok(Ok(namesakes)) => namesakes,
+                _ => Vec::new(),
+            };
+            let linked = linked_versions(&state.mb, std::slice::from_ref(&found)).await;
+            if has_other_version(&found, &namesakes) || has_other_version(&found, &linked) {
+                tag_edition(&mut book, edition_tag(found.kind.as_deref()));
             }
             Json(book).into_response()
         }
         Ok(_) | Err(UpstreamError::NotFound) => error(StatusCode::NOT_FOUND, "Not found"),
         Err(err) => upstream_error("lookup", err),
     }
+}
+
+/// The series that those `found` link to as their source or adaptation (see `version_links`) and
+/// that are not among them, read by id so their kind is known. At most `MAX_LINKED` reads, and
+/// none after `LINKED_TIMEOUT`; a read that fails is left out, which leaves that series untagged
+/// rather than failing the answer.
+async fn linked_versions(mb: &Client, found: &[Series]) -> Vec<Series> {
+    let mut wanted: Vec<u64> = Vec::new();
+    for id in found.iter().flat_map(version_links) {
+        if !wanted.contains(&id) && !found.iter().any(|s| s.id == id) {
+            wanted.push(id);
+        }
+    }
+    let deadline = tokio::time::Instant::now() + LINKED_TIMEOUT;
+    let mut linked = Vec::new();
+    for id in wanted.into_iter().take(MAX_LINKED) {
+        match tokio::time::timeout_at(deadline, mb.series(id)).await {
+            Ok(Ok(series)) => linked.push(series),
+            Ok(Err(_)) => {}
+            Err(_) => break,
+        }
+    }
+    linked
 }
 
 /// A series by id. One merged into another answers with the one it now lives in, once.
@@ -341,6 +376,9 @@ mod tests {
                                 Some("Solo Leveling") => {
                                     include_str!("../testdata/search-solo-leveling.json")
                                 }
+                                Some(q) if q.starts_with("This is Screwed Up") => {
+                                    include_str!("../testdata/search-screwed-up.json")
+                                }
                                 _ => include_str!("../testdata/search-empty.json"),
                             },
                         )
@@ -353,6 +391,10 @@ mod tests {
                     match id.as_str() {
                         "1692" => fixture(&status, include_str!("../testdata/series-1692.json")),
                         "3397" => fixture(&status, include_str!("../testdata/series-3397.json")),
+                        "2320" => fixture(&status, include_str!("../testdata/series-2320.json")),
+                        "105880" => {
+                            fixture(&status, include_str!("../testdata/series-105880.json"))
+                        }
                         "999001" => fixture(
                             &status,
                             include_str!("../testdata/series-999001-merged.json"),
@@ -781,5 +823,45 @@ mod tests {
             .find(|m| m["providerId"] == "1692vol3")
             .unwrap();
         assert_eq!(manga["series"][0]["series"], "Berserk");
+    }
+
+    #[tokio::test]
+    async fn a_manga_and_its_novel_of_another_name_are_tagged_by_their_link() {
+        let (base, _) = provider(None).await;
+        // The search finds only the manga; MangaBaka links it to its novel, which has another name.
+        let (code, body, _) = get_json(
+            &format!(
+                "{base}/search?query=This+is+Screwed+Up%2C+but+I+Was+Reincarnated+as+a+GIRL+in+Another+World%21+Vol.+9"
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200);
+        let manga = &body["matches"][0];
+        assert_eq!(manga["providerId"], "2320vol9");
+        assert_eq!(
+            manga["series"][0]["series"],
+            "This is Screwed Up, but I Was Reincarnated as a GIRL in Another World! (Manga)"
+        );
+        assert_eq!(
+            manga["displayTitle"],
+            "This is Screwed Up, but I Was Reincarnated as a GIRL in Another World! - Vol. 9"
+        );
+
+        // A refresh by id keeps the tag.
+        let (code, book, _) = get_json(&format!("{base}/book/2320vol9"), None).await;
+        assert_eq!(code, 200);
+        assert_eq!(
+            book["series"][0]["series"],
+            "This is Screwed Up, but I Was Reincarnated as a GIRL in Another World! (Manga)"
+        );
+
+        // The novel, looked up by id, is tagged through its link to the manga.
+        let (code, novel, _) = get_json(&format!("{base}/book/105880vol1"), None).await;
+        assert_eq!(code, 200);
+        assert_eq!(
+            novel["series"][0]["series"],
+            "Not sure, but it looks like I got reincarnated in another world. (Novel)"
+        );
     }
 }

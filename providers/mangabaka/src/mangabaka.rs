@@ -43,6 +43,17 @@ pub struct Series {
     pub publishers: Option<Vec<Publisher>>,
     pub genres: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
+    /// The series MangaBaka links this one to: its source, adaptations, sequels and the like.
+    pub relationships_v2: Option<Vec<Relation>>,
+}
+
+/// One link from a series to another: `source` (the work it was adapted from), `adaptation`,
+/// `sequel`, `spin_off` and so on.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Relation {
+    pub to_series_id: u64,
+    pub relation_type: Option<String>,
 }
 
 /// One of a series' names in one language: official, alternative or a fan translation.

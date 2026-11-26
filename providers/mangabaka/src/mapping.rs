@@ -420,17 +420,36 @@ pub fn edition_tag(kind: Option<&str>) -> &'static str {
     }
 }
 
-/// Whether `others` holds the other version of `s` under the same name: a novel for a comic, a
-/// comic for a novel. Two versions of one story, which BookOrbit would file as one series unless
+/// The series MangaBaka links to `s` as the work it was adapted from or into: a manga's novel, a
+/// novel's manga. Those can go by another name ("This is Screwed Up, but I Was Reincarnated as a
+/// GIRL in Another World!" is the manga of "Not sure, but it looks like I got reincarnated in
+/// another world."), so the link is what tells them apart, not the name.
+pub fn version_links(s: &Series) -> Vec<u64> {
+    s.relationships_v2
+        .iter()
+        .flatten()
+        .filter(|r| matches!(r.relation_type.as_deref(), Some("source" | "adaptation")))
+        .map(|r| r.to_series_id)
+        .filter(|id| *id != s.id)
+        .collect()
+}
+
+/// Whether `others` holds the other version of `s`: a novel for a comic, a comic for a novel. It is
+/// either a series of the same name or one MangaBaka links to `s` as its source or adaptation, in
+/// either direction. Two versions of one story, which BookOrbit would file as one series unless
 /// their names differ.
 pub fn has_other_version(s: &Series, others: &[Series]) -> bool {
     let name = |series: &Series| title_words(&tidy_title(&english_title(series))).join(" ");
     let novel = |series: &Series| series.kind.as_deref() == Some("novel");
     let own = name(s);
-    !own.is_empty()
-        && others
-            .iter()
-            .any(|o| o.id != s.id && novel(o) != novel(s) && name(o) == own)
+    let links = version_links(s);
+    others.iter().any(|o| {
+        o.id != s.id
+            && novel(o) != novel(s)
+            && ((!own.is_empty() && name(o) == own)
+                || links.contains(&o.id)
+                || version_links(o).contains(&s.id))
+    })
 }
 
 /// Puts the edition after the series' name, in the series and in the title: "Solo Leveling
