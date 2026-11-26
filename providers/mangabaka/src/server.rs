@@ -21,11 +21,12 @@ use crate::{Config, VERSION};
 const DEFAULT_LIMIT: usize = 5;
 const MAX_LIMIT: usize = 20;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// A series id, then `v` and a volume for one volume of it: `1692`, `1692v3`, `1692v10.5`.
-const MAX_ID_LENGTH: usize = 20;
+/// A series id, then `vol` and a volume (or a range of them) and/or `v` and a chapter (or a range):
+/// `1692`, `1692vol3`, `1692vol9-10`, `1692vol2v7-9`.
+const MAX_ID_LENGTH: usize = 32;
 static BOOK_ID: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^([0-9]{1,12})(?:(os)|(?:vol([0-9]{1,4}(?:\.[0-9]{1,2})?))?(?:v([0-9]{1,4}(?:\.[0-9]{1,2})?(?:-[0-9]{1,4}(?:\.[0-9]{1,2})?)?))?)$",
+        r"^([0-9]{1,12})(?:(os)|(?:vol([0-9]{1,4}(?:\.[0-9]{1,2})?(?:-[0-9]{1,4}(?:\.[0-9]{1,2})?)?))?(?:v([0-9]{1,4}(?:\.[0-9]{1,2})?(?:-[0-9]{1,4}(?:\.[0-9]{1,2})?)?))?)$",
     )
     .expect("valid id pattern")
 });
@@ -641,6 +642,8 @@ mod tests {
             ("1692vol2v11", "Berserk - Vol. 2 Ch. 11", Some("11")),
             ("1692v0-6", "Berserk - Ch. 0-6", Some("0")),
             ("1692vol2v7-9", "Berserk - Vol. 2 Ch. 7-9", Some("7")),
+            ("1692vol9-10", "Berserk - Vol. 9-10", Some("9")),
+            ("1692vol1-2v3", "Berserk - Vol. 1-2 Ch. 3", Some("3")),
             ("1692os", "Berserk - Oneshot", None),
         ] {
             let (code, body, _) = get_json(&format!("{base}/book/{id}"), None).await;
@@ -654,7 +657,7 @@ mod tests {
                 "lookup {id}"
             );
         }
-        for id in ["5", "abc", "..", &"9".repeat(13), "1692v", "1692v3v4", "1692vol", "1692v3vol2", "1692v-6", "1692v0-", "1692osv3", "1692os3", "1692vol2os"] {
+        for id in ["5", "abc", "..", &"9".repeat(13), "1692v", "1692v3v4", "1692vol", "1692v3vol2", "1692v-6", "1692v0-", "1692osv3", "1692os3", "1692vol2os", "1692vol9-", "1692vol-9"] {
             let (code, _, _) = get_json(&format!("{base}/book/{id}"), None).await;
             assert_eq!(code, 404, "lookup {id}");
         }

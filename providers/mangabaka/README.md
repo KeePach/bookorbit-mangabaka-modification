@@ -11,6 +11,8 @@ Titles and series names are always returned in English.
   `Series - Ch.0006 - Chapter Name - Author (en) [group]` searches for `Series`.
 - **Series index = chapter, else volume, else nothing.** `Vol. 2 Ch. 8` gives `8`, `Vol. 2` gives `2`,
   neither gives an empty index. The full `Vol. 2 Ch. 8` label stays in the title only.
+- **Ranges.** A range of volumes or chapters (`Vol. 9-10`, `Vols. 1-3`, `Ch. 7-9`) stays in the title
+  and the id; the series index is its first number.
 - **Number cleanup.** Leading zeros go (`Ch.0006` becomes `6`), and so do meaningless trailing decimal
   zeros (`12.50` becomes `12.5`).
 - **Wider marker detection.** `(`, `[` and `_` around the number are accepted (`Series (Vol 2)`).

@@ -67,7 +67,9 @@ fn regex(pattern: &str) -> Regex {
 // "Chapter", "Chptr", and "C#". Allow common typos like "volum" and "chaptr" too.
 // Rust's regex engine does not support look-ahead, so we use a non-lookaround end condition.
 static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
-    regex(r"(?i)(?:^|[\s\-:(\[_])(?:vol(?:ume|um)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:$|[\s\-:,)\](\[_])")
+    // "Vol. 3", "v03", and a range of volumes with no spaces around the dash: "Vol. 9-10",
+    // "Vols. 1-3". Group 1 is the volume, group 2 the end of a range.
+    regex(r"(?i)(?:^|[\s\-:(\[_])(?:vol(?:umes?|ums?|s)?|vl|v)\.?\s*(?:#\s*)?([0-9]{1,4}(?:\.[0-9]+)?)(?:[-\x{2013}\x{2014}~]([0-9]{1,4}(?:\.[0-9]+)?))?(?:$|[\s\-:,)\](\[_])")
 });
 static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
     // "Ch. 8", "chapter8", "c#8", "c008", and a range of chapters with no spaces around the dash:
@@ -187,15 +189,8 @@ pub fn split_volume(query: &str) -> (String, String) {
     let query = query.trim();
     let volume_match = VOLUME.captures(query);
     let chapter_match = CHAPTER.captures(query);
-    let number = |found: &Option<regex::Captures>| {
-        found
-            .as_ref()
-            .and_then(|captures| captures.get(1))
-            .map(|value| normalize_number(value.as_str()))
-            .unwrap_or_default()
-    };
-    let volume = number(&volume_match);
-    let chapter = chapter_match.as_ref().map(chapter_text).unwrap_or_default();
+    let volume = volume_match.as_ref().map(range_text).unwrap_or_default();
+    let chapter = chapter_match.as_ref().map(range_text).unwrap_or_default();
 
     // A title an earlier scrape left with only its number ("Title - 39") has lost its marker.
     // Read the number as the chapter, so scraping the same book again keeps it instead of
@@ -245,9 +240,9 @@ pub fn split_volume(query: &str) -> (String, String) {
     }
 }
 
-/// The chapter a match names: "8", or "0-6" for a range of chapters. A range that goes nowhere
-/// ("6-2", "3-3") is only its first chapter.
-fn chapter_text(captures: &regex::Captures) -> String {
+/// The volume or chapter a match names: "8", or "0-6" for a range ("Vol. 9-10", "Ch. 0-6"). A
+/// range that goes nowhere ("6-2", "3-3") is only its first number.
+fn range_text(captures: &regex::Captures) -> String {
     let start = captures
         .get(1)
         .map(|found| normalize_number(found.as_str()))
@@ -275,7 +270,7 @@ pub fn position_label(title: &str, series_index: Option<&str>) -> String {
     }
     series_index
         .and_then(|index| INDEX_ONLY.captures(index))
-        .map(|captures| index_label("", &chapter_text(&captures)))
+        .map(|captures| index_label("", &range_text(&captures)))
         .unwrap_or_default()
 }
 
@@ -309,12 +304,11 @@ fn id_suffix(label: &str) -> String {
 fn series_index_numbers(series_index: &str) -> (String, String) {
     let volume = VOLUME
         .captures(series_index)
-        .and_then(|captures| captures.get(1))
-        .map(|value| normalize_number(value.as_str()))
+        .map(|captures| range_text(&captures))
         .unwrap_or_default();
     let chapter = CHAPTER
         .captures(series_index)
-        .map(|captures| chapter_text(&captures))
+        .map(|captures| range_text(&captures))
         .unwrap_or_default();
     (volume, chapter)
 }
@@ -325,7 +319,8 @@ fn provider_index(series_index: &str) -> String {
         // A range of chapters sits in the series at its first one: "0-6" is 0.
         chapter.split('-').next().unwrap_or_default().to_string()
     } else {
-        volume
+        // So does a range of volumes: "9-10" is 9.
+        volume.split('-').next().unwrap_or_default().to_string()
     }
 }
 
@@ -344,8 +339,9 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
         p.kind.as_deref() == Some("English") && p.name.as_deref() == Some(publisher.as_str())
     });
     let volume_number = series_index_numbers(volume).0;
-    // The series' start says when volume 1 came out, not a later one.
-    let dated = volume.is_empty() || volume == ONESHOT_LABEL || volume_number == "1";
+    // The series' start says when volume 1 came out, not a later one ("Vol. 1-2" starts with 1).
+    let first_volume = volume_number.split('-').next().unwrap_or_default();
+    let dated = volume.is_empty() || volume == ONESHOT_LABEL || first_volume == "1";
     let published_date = s
         .published
         .as_ref()
@@ -844,6 +840,47 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn splits_a_range_of_volumes_off_the_query() {
+        let cases = [
+            (
+                "Booty Royale: Never Go Down Without a Fight! - Vol. 9-10",
+                "Booty Royale: Never Go Down Without a Fight!",
+                "Vol. 9-10",
+            ),
+            ("Berserk Vols. 01-03", "Berserk", "Vol. 1-3"),
+            ("Berserk Volumes 4\u{2013}6 (Omnibus)", "Berserk", "Vol. 4-6"),
+            ("Berserk v09-10 Ch. 80", "Berserk", "Vol. 9-10 Ch. 80"),
+            // A range that goes nowhere is its first volume; spaced dashes are not a range.
+            ("Berserk Vol. 10-9", "Berserk", "Vol. 10"),
+            ("Berserk Vol. 9 - 10 Angry Men", "Berserk", "Vol. 9"),
+            ("Berserk Vol. 3", "Berserk", "Vol. 3"),
+        ];
+        for (query, title, volume) in cases {
+            assert_eq!(
+                split_volume(query),
+                (title.to_string(), volume.to_string()),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn maps_a_range_of_volumes() {
+        let series = load_series(SERIES_1692);
+        let omnibus = map_series(&series, "Vol. 9-10");
+        assert_eq!(
+            (
+                omnibus.provider_id.as_str(),
+                omnibus.title.as_str(),
+                omnibus.series[0].sequence.as_str()
+            ),
+            ("1692vol9-10", "Berserk - Vol. 9-10", "9")
+        );
+        assert!(omnibus.published_date.is_empty());
+        assert!(!map_series(&series, "Vol. 1-2").published_year.is_empty());
     }
 
     #[test]
