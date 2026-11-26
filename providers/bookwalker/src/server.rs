@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
@@ -43,6 +43,7 @@ pub fn routes(cfg: Arc<Config>, store: Arc<Store>, pages: Arc<Pages>) -> Router 
         .route("/provider/info", get(info))
         .route("/search", get(search))
         .route("/book/{id}", get(lookup))
+        .route("/open/{id}", get(open))
         .route("/catalog/refresh", post(refresh))
         .with_state(AppState { cfg, store, pages })
 }
@@ -66,6 +67,14 @@ async fn info(State(state): State<AppState>) -> Response {
         // number. A BookOrbit that does not send them is unaffected.
         "searchParams": ["limit", "series", "seriesIndex"],
         "idMaxLength": MAX_ID_LENGTH,
+        // An id is not a page address, so the template points at this provider's own `/open/{id}`,
+        // which sends the browser on to the volume, chapter or series on bookwalker.com. Only
+        // declared when `PUBLIC_URL` says where a browser can reach this provider.
+        "bookUrlTemplate": state
+            .cfg
+            .public_url
+            .as_ref()
+            .map(|base| format!("{base}/open/{{id}}")),
         "coverShape": "portrait",
         // BookWalker's own accent (`--color-yellow-350`, its button and highlight yellow). Its
         // theme color is black, which cannot be read on a dark page.
@@ -465,6 +474,36 @@ async fn look_up(
     }
 }
 
+/// Sends a browser from a provider id to its page on bookwalker.com. It is what a provider link
+/// opens, so it answers without the auth token. Volumes and chapters need nothing looked up
+/// (bookwalker.com adds the slug itself); a series page only renders at its address with the slug,
+/// which comes from the catalog.
+async fn open(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+    let Some(parsed) = parse_provider_id(&raw) else {
+        return error(StatusCode::NOT_FOUND, "Not found");
+    };
+    let url = match &parsed.target {
+        Target::Item(kind, id) => format!("https://bookwalker.com/{}/{id}", kind.path()),
+        Target::Series(id) => {
+            let catalog = match state.store.snapshot() {
+                Some(catalog) => catalog,
+                None => match tokio::time::timeout(REQUEST_TIMEOUT, state.store.get()).await {
+                    Ok(Ok(catalog)) => catalog,
+                    Ok(Err(err)) => return upstream_error("open", err),
+                    Err(_) => {
+                        return upstream_error("open", UpstreamError::Failed("timed out".into()))
+                    }
+                },
+            };
+            match catalog.series_slug(id) {
+                Some(slug) => format!("https://bookwalker.com/series/{id}/{slug}"),
+                None => return error(StatusCode::NOT_FOUND, "Not found"),
+            }
+        }
+    };
+    Redirect::temporary(&url).into_response()
+}
+
 /// Fetches a fresh catalog now, behind the answer. Not needed in normal use: the first search of
 /// each day does this on its own.
 async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -622,6 +661,7 @@ mod tests {
         let _ = upstream;
         let cfg = Config {
             auth_token: auth_token.map(str::to_string),
+            public_url: Some("http://localhost:9999".to_string()),
         };
         serve(routes(Arc::new(cfg), store, pages)).await
     }
@@ -914,5 +954,47 @@ mod tests {
         upstream.status.store(429, Ordering::SeqCst);
         let (code, _) = get_json(&format!("{base}/book/v-0B08EGZVR4NG"), Some("secret")).await;
         assert_eq!(code, 429);
+    }
+
+    #[tokio::test]
+    async fn open_sends_an_id_to_its_page_on_bookwalker() {
+        let (base, _) = provider(Some("secret")).await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        // A link opens in a browser, which has no token: /open answers without one.
+        for (id, to) in [
+            (
+                "v-1K4M8FFM0DZG_vol9-10",
+                "https://bookwalker.com/volume/1K4M8FFM0DZG",
+            ),
+            (
+                "c-3EW93XA7Z120_v51",
+                "https://bookwalker.com/chapter/3EW93XA7Z120",
+            ),
+            (
+                "s-1M9B28BP9B40_v5",
+                "https://bookwalker.com/series/1M9B28BP9B40/blue-exorcist",
+            ),
+        ] {
+            let res = client
+                .get(format!("{base}/open/{id}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status().as_u16(), 307, "open {id}");
+            assert_eq!(res.headers()["location"], to, "open {id}");
+        }
+        for id in ["s-ZZZZZZZZZZZZ", "abc", "v-0B08EGZVR4NG_x"] {
+            let res = client
+                .get(format!("{base}/open/{id}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status().as_u16(), 404, "open {id}");
+        }
+        let (_, info) = get_json(&format!("{base}/provider/info"), None).await;
+        assert_eq!(info["bookUrlTemplate"], "http://localhost:9999/open/{id}");
     }
 }

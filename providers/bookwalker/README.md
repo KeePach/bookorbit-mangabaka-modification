@@ -24,6 +24,10 @@ services:
       dockerfile: Dockerfile
     image: bookwalker-provider:local
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8082:8080"
+    environment:
+      PUBLIC_URL: http://localhost:8082
     volumes:
       - bookwalker-data:/data
 
@@ -94,6 +98,7 @@ use: `docker exec bookorbit-app wget -qO- --post-data= http://bookwalker:8080/ca
 |---|---|---|
 | `PORT` | `8080` | |
 | `AUTH_TOKEN` | unset | When set, every route but `/provider/info` requires this exact `Authorization` header |
+| `PUBLIC_URL` | unset | Where a browser reaches this provider (`http://localhost:8082` with the port above). When set, BookOrbit shows each BookWalker id as a link that opens the volume, chapter or series on bookwalker.com |
 | `DATA_DIR` | `/data` | Where the list is saved; empty keeps it in memory only |
 | `REQUEST_INTERVAL_MS` | `1000` | Gap between pages read from bookwalker.com |
 | `PAGE_CACHE_MINUTES` | `60` | How long a read series, volume or chapter page is kept |
@@ -111,6 +116,7 @@ someone browses. A caller that would wait more than 15 seconds for its turn gets
 | `GET /provider/info` | Key `bookwalker`, media `book` and `comic`, lookup, `series`/`seriesIndex` search parameters |
 | `GET /search?query=&author=&mediaType=&series=&seriesIndex=&limit=` | `limit` defaults to 5, at most 20 |
 | `GET /book/{id}` | An id from a search |
+| `GET /open/{id}` | Redirects a browser to the id's page on bookwalker.com (no token needed) |
 | `POST /catalog/refresh` | Fetch a fresh list now (answers `202` at once) |
 
 Status codes: `400` no query, `401` bad token, `404` unknown id, `429` with `Retry-After` when

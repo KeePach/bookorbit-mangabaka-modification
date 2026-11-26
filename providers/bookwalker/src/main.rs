@@ -9,10 +9,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const VERSION: &str = "0.1.5";
+pub const VERSION: &str = "0.1.6";
 
 pub struct Config {
     pub auth_token: Option<String>,
+    /// Where a browser reaches this provider (`PUBLIC_URL`), for the "open on BookWalker" links.
+    pub public_url: Option<String>,
 }
 
 #[tokio::main]
@@ -29,6 +31,10 @@ async fn main() {
         auth_token: std::env::var("AUTH_TOKEN")
             .ok()
             .filter(|token| !token.is_empty()),
+        public_url: std::env::var("PUBLIC_URL")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| url.starts_with("http://") || url.starts_with("https://")),
     };
     // BookWalker publishes no limit; one page a second stays well under what its own site loads
     // while someone browses.
