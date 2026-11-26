@@ -72,6 +72,10 @@ use: `docker exec bookorbit-app wget -qO- --post-data= http://bookwalker:8080/ca
   volumes only), the volume holding it is used if the file name says the volume
   (`Blue Exorcist v05 c38` → volume 5, titled `Blue Exorcist - Vol. 5 Ch. 38`), else the series
   itself, still titled with the chapter (`Blue Exorcist - Ch. 5`).
+- When BookWalker sells a series both as a comic and as a novel under the same name, both are
+  tagged so BookOrbit files them as two series: `Mushoku Tensei: Jobless Reincarnation (Manga) -
+  Vol. 3` and `… (Novel) - Vol. 3`. BookOrbit still matches against the untagged title, sent as
+  the display title.
 - A manga and its novel often share a name. Both come back, each labelled with its own media type
   (manga and webtoons `comic`, novels `book`), and BookOrbit picks by the book's file: a CBZ or CBR
   prefers the manga, an EPUB the novel.

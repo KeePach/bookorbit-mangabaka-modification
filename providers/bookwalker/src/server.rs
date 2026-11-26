@@ -18,8 +18,8 @@ use crate::label::{
     without_edition,
 };
 use crate::mapping::{
-    edition_tag, map_item, map_series, parse_provider_id, tag_edition, BookMetadata, Target,
-    MAX_ID_LENGTH,
+    edition_tag, map_item, map_series, other_version, parse_provider_id, tag_edition, BookMetadata,
+    Target, MAX_ID_LENGTH,
 };
 use crate::pages::{Format, ItemKind, ItemPage, SeriesPage};
 use crate::{Config, VERSION};
@@ -295,18 +295,21 @@ async fn find(
             return Err(err);
         }
     }
-    // A manga or webtoon whose novel of the same name came up too is tagged "(Manga)", so BookOrbit
-    // files the two apart.
-    let novels: HashSet<String> = found
+    // A series whose other version (the novel of a manga, the manga of a novel) came up under the
+    // same name is tagged "(Manga)" or "(Novel)", so BookOrbit files the two apart.
+    let read: Vec<(String, Format)> = found
         .iter()
         .filter_map(|f| f.series.as_ref())
-        .filter(|s| s.format == Format::Novel)
-        .map(|s| slugify(&s.name))
+        .map(|s| (slugify(&s.name), s.format))
         .collect();
     for f in &mut found {
         if let Some(series) = &f.series {
             if let Some(tag) = edition_tag(series.format) {
-                if novels.contains(&slugify(&series.name)) {
+                let name = slugify(&series.name);
+                if read
+                    .iter()
+                    .any(|(other, format)| *other == name && other_version(series.format, *format))
+                {
                     tag_edition(&mut f.book, tag);
                 }
             }
@@ -486,7 +489,7 @@ async fn look_up(
             };
             let mut book = map_item(&item, series.as_deref(), label);
             if let Some(series) = &series {
-                tag_if_novel_namesake(state, series, &mut book).await;
+                tag_if_other_version(state, series, &mut book).await;
             }
             Ok(book)
         }
@@ -496,16 +499,17 @@ async fn look_up(
             let slug = catalog.series_slug(id).ok_or(UpstreamError::NotFound)?;
             let series = state.pages.series(id, slug).await?;
             let mut book = map_series(&series, label);
-            tag_if_novel_namesake(state, &series, &mut book).await;
+            tag_if_other_version(state, &series, &mut book).await;
             Ok(book)
         }
     }
 }
 
-/// Tags a manga or webtoon "(Manga)" when the catalog holds a novel of the same name, as the search
-/// does, so a refresh by id keeps the tag. Another series with the same slug is read (its page is
-/// cached) to see whether it is the novel. A page that cannot be read leaves the record untagged.
-async fn tag_if_novel_namesake(state: &AppState, series: &SeriesPage, book: &mut BookMetadata) {
+/// Tags a series "(Manga)" or "(Novel)" when the catalog holds its other version under the same
+/// name, as the search does, so a refresh by id keeps the tag. Another series with the same slug is
+/// read (its page is cached) to see which it is. A page that cannot be read leaves the record
+/// untagged.
+async fn tag_if_other_version(state: &AppState, series: &SeriesPage, book: &mut BookMetadata) {
     let Some(tag) = edition_tag(series.format) else {
         return;
     };
@@ -520,7 +524,7 @@ async fn tag_if_novel_namesake(state: &AppState, series: &SeriesPage, book: &mut
         .collect();
     for (id, slug) in namesakes {
         if let Ok(page) = state.pages.series(&id, &slug).await {
-            if page.format == Format::Novel {
+            if other_version(series.format, page.format) {
                 tag_edition(book, tag);
                 return;
             }
@@ -833,9 +837,16 @@ mod tests {
         assert_eq!(body["matches"][1]["mediaType"], "book");
         assert_eq!(
             body["matches"][1]["title"],
+            "Goblin Slayer Side Story: Year One (Novel) - Ch. 51"
+        );
+        assert_eq!(
+            body["matches"][1]["series"][0]["series"],
+            "Goblin Slayer Side Story: Year One (Novel)"
+        );
+        assert_eq!(
+            body["matches"][1]["displayTitle"],
             "Goblin Slayer Side Story: Year One - Ch. 51"
         );
-        assert!(body["matches"][1].get("displayTitle").is_none());
     }
 
     #[tokio::test]

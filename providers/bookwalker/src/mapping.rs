@@ -216,13 +216,21 @@ pub fn map_series(series: &SeriesPage, label: &str) -> BookMetadata {
     }
 }
 
-/// The word a comic is tagged with when BookWalker also sells a novel of the same name.
+/// The word a series is tagged with when BookWalker sells it both as a comic and as a novel of the
+/// same name: "Mushoku Tensei: Jobless Reincarnation (Manga)" and "… (Novel)".
 pub fn edition_tag(format: Format) -> Option<&'static str> {
     match format {
         Format::Manga => Some("Manga"),
         Format::Webtoon => Some("Webtoon"),
-        Format::Novel | Format::Audiobook | Format::Unknown => None,
+        Format::Novel => Some("Novel"),
+        Format::Audiobook | Format::Unknown => None,
     }
+}
+
+/// Whether two formats are the two versions the tag tells apart: a comic and a novel.
+pub fn other_version(a: Format, b: Format) -> bool {
+    let comic = |f: Format| matches!(f, Format::Manga | Format::Webtoon);
+    (comic(a) && b == Format::Novel) || (a == Format::Novel && comic(b))
 }
 
 /// Puts the edition after the series' name, in the series and in the title: "Mushoku Tensei:
@@ -235,7 +243,11 @@ pub fn tag_edition(book: &mut BookMetadata, tag: &str) {
     };
     let name = entry.series.clone();
     let last = crate::label::title_words(&name).pop().unwrap_or_default();
-    if ["manga", "manhwa", "manhua", "comic", "comics", "webtoon"].contains(&last.as_str()) {
+    if [
+        "manga", "manhwa", "manhua", "comic", "comics", "webtoon", "novel", "novels",
+    ]
+    .contains(&last.as_str())
+    {
         return;
     }
     let tagged = format!("{name} ({tag})");
