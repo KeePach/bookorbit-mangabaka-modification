@@ -81,7 +81,8 @@ use: `docker exec bookorbit-app wget -qO- --post-data= http://bookwalker:8080/ca
 - **Authors** the story credits, then the art (`AUTHOR`, `ARTIST`); translators, letterers and
   editors are left out.
 - **Publisher**, **ISBN-13**, **release date**, **language**, **description** and **cover**
-  (1200 px) from the volume or chapter page; **genres** and **tags** from the series page.
+  (1200 px) from the volume or chapter page; **genres** and **tags** from the series page. The
+  description is the full text behind "Read more", not the tagline some volumes show first.
 - **Mature titles** show a placeholder cover to visitors who are not signed in, so their records
   have no cover and BookOrbit keeps the one it has.
 - Audiobooks are skipped. There is no ISBN search (it would need BookWalker's own search).

@@ -184,6 +184,20 @@ pub fn parse_item(kind: ItemKind, id: &str, html: &str) -> Option<ItemPage> {
     let format = breadcrumb_format(&records)
         .or_else(|| FORMAT.captures(html).map(|c| Format::parse(&c[1])))
         .unwrap_or(Format::Unknown);
+    // The book record carries the page's first line, which for some volumes is only a tagline
+    // ("All-Girl Eightway!"); the description tags carry the full text behind "Read more".
+    let metas = metas(html);
+    let full = ["og:description", "description"]
+        .iter()
+        .find_map(|key| metas.iter().find(|(name, _)| name == key))
+        .map(|(_, value)| decode(value))
+        .unwrap_or_default();
+    let short = text("description");
+    let description = if full.chars().count() > short.chars().count() {
+        full
+    } else {
+        short
+    };
     let isbn: String = text("isbn").chars().filter(char::is_ascii_digit).collect();
     let published = text("datePublished");
     Some(ItemPage {
@@ -191,7 +205,7 @@ pub fn parse_item(kind: ItemKind, id: &str, html: &str) -> Option<ItemPage> {
         id: id.to_string(),
         name: text("name"),
         url: text("url"),
-        description: tidy_description(&text("description")),
+        description: tidy_description(&description),
         cover: visible_cover(&text("image")),
         isbn: if isbn.len() == 13 {
             isbn
@@ -509,6 +523,11 @@ mod tests {
         let page = parse_item(ItemKind::Volume, "1K4M8FFM0DZG", VOLUME_BOOTY_9_10).unwrap();
         assert_eq!(page.label(), "Vol. 9-10");
         assert_eq!(page.cover, "");
+        // Its book record has only the tagline; the full text is in the description tags.
+        assert!(page
+            .description
+            .starts_with("The Ultimate Power and Beauty Showdown"));
+        assert!(page.description.contains("It's time to knuckle up"));
         assert_eq!(page.isbn, "9781685799922");
     }
 
