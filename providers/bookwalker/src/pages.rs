@@ -232,33 +232,36 @@ pub fn parse_series(id: &str, slug: &str, html: &str) -> Option<SeriesPage> {
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| meta("description"));
     let details = details(html);
-    let mut seen = HashSet::new();
-    let volumes = ANCHOR
-        .captures_iter(html)
-        .filter_map(|captures| {
-            let attributes = attributes(&captures[1]);
-            let href = attributes
-                .iter()
-                .find(|(name, _)| name == "href")?
-                .1
-                .as_str();
-            let item = ITEM_HREF.captures(href)?;
-            if &item[1] != "volume" || !seen.insert(item[2].to_string()) {
-                return None;
-            }
-            let text = attributes
-                .iter()
-                .find(|(name, _)| name == "aria-label")
-                .map(|(_, value)| decode(value))
-                .unwrap_or_else(|| plain(&captures[2]));
-            let (_, label) = split_volume(&text);
-            Some(ItemLink {
+    // Each volume is linked three times (its cover, its name, "View Details"); the one with a
+    // label says which volume it is.
+    let mut volumes: Vec<ItemLink> = Vec::new();
+    for captures in ANCHOR.captures_iter(html) {
+        let attributes = attributes(&captures[1]);
+        let Some(href) = attributes.iter().find(|(name, _)| name == "href") else {
+            continue;
+        };
+        let Some(item) = ITEM_HREF.captures(&href.1) else {
+            continue;
+        };
+        if &item[1] != "volume" {
+            continue;
+        }
+        let text = attributes
+            .iter()
+            .find(|(name, _)| name == "aria-label")
+            .map(|(_, value)| decode(value))
+            .unwrap_or_else(|| plain(&captures[2]));
+        let (_, label) = split_volume(&text);
+        match volumes.iter_mut().find(|link| link.id == item[2]) {
+            Some(link) if link.label.is_empty() => link.label = label,
+            Some(_) => {}
+            None => volumes.push(ItemLink {
                 id: item[2].to_string(),
                 slug: item[3].to_string(),
                 label,
-            })
-        })
-        .collect();
+            }),
+        }
+    }
     Some(SeriesPage {
         id: id.to_string(),
         slug: slug.to_string(),
@@ -570,7 +573,9 @@ mod tests {
         .unwrap();
         assert_eq!(page.name, "Booty Royale: Never Go Down Without a Fight!");
         assert_eq!(page.cover, "");
+        // Linked three times each (cover, name, "View Details"), listed once with its name.
         let labels: Vec<&str> = page.volumes.iter().map(|v| v.label.as_str()).collect();
+        assert_eq!(labels.len(), 9);
         assert_eq!(labels[4], "Vol. 9-10");
         assert_eq!(page.volumes[4].id, "1K4M8FFM0DZG");
     }

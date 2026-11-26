@@ -367,7 +367,12 @@ async fn pick_item(
             Err(err) => return Err(err),
         }
     }
-    let listed_ids: HashSet<&str> = series.volumes.iter().map(|link| link.id.as_str()).collect();
+    let listed_ids: HashSet<&str> = series
+        .volumes
+        .iter()
+        .filter(|link| !link.label.is_empty())
+        .map(|link| link.id.as_str())
+        .collect();
     let ids: Vec<String> = catalog
         .items_of(false, &series.slug, extra, &wanted.volume)
         .iter()
