@@ -67,7 +67,9 @@ async fn info(State(state): State<AppState>) -> Response {
         "searchParams": ["limit", "series", "seriesIndex"],
         "idMaxLength": MAX_ID_LENGTH,
         "coverShape": "portrait",
-        "color": "#000000",
+        // BookWalker's own accent (`--color-yellow-350`, its button and highlight yellow). Its
+        // theme color is black, which cannot be read on a dark page.
+        "color": "#edb45e",
         // A search reads up to three series pages and a volume or chapter page.
         "rateLimit": {
             "maxConcurrency": 1,
@@ -892,6 +894,7 @@ mod tests {
         let (code, body) = get_json(&format!("{base}/provider/info"), None).await;
         assert_eq!((code, body["key"].as_str()), (200, Some("bookwalker")));
         assert_eq!(body["authenticationRequired"], true);
+        assert_eq!(body["color"], "#edb45e");
         let (code, _) = get_json(&format!("{base}/search?query=x"), None).await;
         assert_eq!(code, 401);
         let (code, _) = get_json(&format!("{base}/search"), Some("secret")).await;
