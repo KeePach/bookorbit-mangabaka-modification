@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::mangabaka::{Client, Series, UpstreamError};
 use crate::mapping::{
-    author_matches, display_title, index_label, map_series, names_exactly, position_label,
+    author_matches, display_title, edition_tag, has_novel_namesake, tag_edition, index_label, map_series, names_exactly, position_label,
     search_queries, shared_words, shares_a_word, split_volume, without_brackets, BookMetadata,
     ONESHOT_LABEL,
 };
@@ -159,6 +159,9 @@ async fn search(
         .map(|s| {
             let mut book = map_series(s, &volume);
             book.display_title = display_title(s, &title, query, &volume);
+            if has_novel_namesake(s, &found) {
+                tag_edition(&mut book, edition_tag(s.kind.as_deref()));
+            }
             book
         })
         .collect();
@@ -218,7 +221,23 @@ async fn lookup(
         .unwrap_or_else(|_| Err(UpstreamError::Failed("timed out".into())));
 
     match result {
-        Ok(found) if found.state == "active" => Json(map_series(&found, &volume)).into_response(),
+        Ok(found) if found.state == "active" => {
+            let mut book = map_series(&found, &volume);
+            // The search tags a comic that has a novel of the same name, so a lookup looks for one
+            // too; otherwise refreshing a book by its id would take the tag away again. A failed
+            // look leaves the record untagged rather than failing it.
+            if found.kind.as_deref() != Some("novel") {
+                let name = book.series.first().map(|s| s.series.clone()).unwrap_or_default();
+                if let Ok(Ok(namesakes)) =
+                    tokio::time::timeout(REQUEST_TIMEOUT, state.mb.search_series(&name, 10)).await
+                {
+                    if has_novel_namesake(&found, &namesakes) {
+                        tag_edition(&mut book, edition_tag(found.kind.as_deref()));
+                    }
+                }
+            }
+            Json(book).into_response()
+        }
         Ok(_) | Err(UpstreamError::NotFound) => error(StatusCode::NOT_FOUND, "Not found"),
         Err(err) => upstream_error("lookup", err),
     }
@@ -319,10 +338,12 @@ mod tests {
                     move |Query(q): Query<HashMap<String, String>>| async move {
                         fixture(
                             &status,
-                            if q.get("q").map(String::as_str) == Some("Berserk") {
-                                include_str!("../testdata/search-berserk.json")
-                            } else {
-                                include_str!("../testdata/search-empty.json")
+                            match q.get("q").map(String::as_str) {
+                                Some("Berserk") => include_str!("../testdata/search-berserk.json"),
+                                Some("Solo Leveling") => {
+                                    include_str!("../testdata/search-solo-leveling.json")
+                                }
+                                _ => include_str!("../testdata/search-empty.json"),
                             },
                         )
                     }
@@ -333,6 +354,7 @@ mod tests {
                 get(move |Path(id): Path<String>| async move {
                     match id.as_str() {
                         "1692" => fixture(&status, include_str!("../testdata/series-1692.json")),
+                        "3397" => fixture(&status, include_str!("../testdata/series-3397.json")),
                         "999001" => fixture(
                             &status,
                             include_str!("../testdata/series-999001-merged.json"),
@@ -713,5 +735,52 @@ mod tests {
             pacer.wait().await,
             Err(UpstreamError::RateLimited { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn a_comic_with_a_novel_of_the_same_name_is_tagged() {
+        let (base, _) = provider(None).await;
+        let (code, body, _) =
+            get_json(&format!("{base}/search?query=Solo+Leveling+Vol.+3"), None).await;
+        assert_eq!(code, 200);
+        let by_id = |id: &str| -> serde_json::Value {
+            body["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["providerId"] == id)
+                .cloned()
+                .unwrap()
+        };
+        // The manhwa is told apart from the novel by name; BookOrbit still matches the plain title.
+        let manhwa = by_id("3397vol3");
+        assert_eq!(manhwa["title"], "Solo Leveling (Manhwa) - Vol. 3");
+        assert_eq!(manhwa["series"][0]["series"], "Solo Leveling (Manhwa)");
+        assert_eq!(manhwa["displayTitle"], "Solo Leveling - Vol. 3");
+        let novel = by_id("85266vol3");
+        assert_eq!(novel["title"], "Solo Leveling - Vol. 3");
+        assert_eq!(novel["series"][0]["series"], "Solo Leveling");
+        assert!(novel.get("displayTitle").is_none());
+        assert_eq!(by_id("1252vol3")["series"][0]["series"], "Solo Leveling: Ragnarok (Manhwa)");
+        // A manhua with no novel of its name stays as it is.
+        let other = by_id("3368vol3");
+        assert!(!other["title"].as_str().unwrap().contains('('));
+
+        // A lookup by id finds the novel too, so a refresh keeps the tag.
+        let (code, book, _) = get_json(&format!("{base}/book/3397vol3"), None).await;
+        assert_eq!(code, 200);
+        assert_eq!(book["title"], "Solo Leveling (Manhwa) - Vol. 3");
+        assert_eq!(book["displayTitle"], "Solo Leveling - Vol. 3");
+
+        // Berserk's novel has another name ("The Flame Dragon Knight"): no tag.
+        let (_, body, _) =
+            get_json(&format!("{base}/search?query=Berserk+Vol.+3"), None).await;
+        let manga = body["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["providerId"] == "1692vol3")
+            .unwrap();
+        assert_eq!(manga["series"][0]["series"], "Berserk");
     }
 }

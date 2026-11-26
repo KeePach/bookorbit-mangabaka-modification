@@ -409,6 +409,51 @@ pub fn map_series(s: &Series, volume: &str) -> BookMetadata {
     }
 }
 
+/// The word a comic is tagged with when MangaBaka also has a novel of the same name: "Solo Leveling
+/// (Manhwa)", "That Time I Got Reincarnated as a Slime (Manga)".
+pub fn edition_tag(kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("manhwa") => "Manhwa",
+        Some("manhua") => "Manhua",
+        _ => "Manga",
+    }
+}
+
+/// Whether `s` is a comic and `others` holds a novel of the same name: two versions of one story,
+/// which BookOrbit would file as one series unless their names differ.
+pub fn has_novel_namesake(s: &Series, others: &[Series]) -> bool {
+    let name = |series: &Series| title_words(&tidy_title(&english_title(series))).join(" ");
+    let own = name(s);
+    s.kind.as_deref() != Some("novel")
+        && !own.is_empty()
+        && others
+            .iter()
+            .any(|o| o.id != s.id && o.kind.as_deref() == Some("novel") && name(o) == own)
+}
+
+/// Puts the edition after the series' name, in the series and in the title: "Solo Leveling
+/// (Manhwa) - Vol. 3". BookOrbit still compares the search against the untagged title, sent as the
+/// display title, so the tag changes no match. A name that already ends in such a word ("Cirque du
+/// Freak: The Manga") is left as it is.
+pub fn tag_edition(book: &mut BookMetadata, tag: &str) {
+    let Some(entry) = book.series.first_mut() else {
+        return;
+    };
+    let name = entry.series.clone();
+    let last = title_words(&name).pop().unwrap_or_default();
+    if ["manga", "manhwa", "manhua", "comic", "comics", "webtoon"].contains(&last.as_str()) {
+        return;
+    }
+    let tagged = format!("{name} ({tag})");
+    if book.display_title.is_empty() {
+        book.display_title = book.title.clone();
+    }
+    if let Some(rest) = book.title.strip_prefix(name.as_str()) {
+        book.title = format!("{tagged}{rest}");
+    }
+    entry.series = tagged;
+}
+
 /// The words BookOrbit leaves out of a query when it checks a result against it.
 const BOOKORBIT_STOPWORDS: &[&str] = &[
     "the", "an", "and", "or", "of", "in", "on", "at", "to", "for", "with", "from", "by", "is", "it",
