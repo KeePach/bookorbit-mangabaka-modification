@@ -18,7 +18,8 @@ use crate::label::{
     without_edition,
 };
 use crate::mapping::{
-    map_item, map_series, parse_provider_id, BookMetadata, Target, MAX_ID_LENGTH,
+    edition_tag, map_item, map_series, parse_provider_id, tag_edition, BookMetadata, Target,
+    MAX_ID_LENGTH,
 };
 use crate::pages::{Format, ItemKind, ItemPage, SeriesPage};
 use crate::{Config, VERSION};
@@ -179,6 +180,8 @@ async fn search(
 
 struct Found {
     book: BookMetadata,
+    /// The series page the record came from, to tell a manga that has a novel of its name.
+    series: Option<Arc<SeriesPage>>,
     by_author: bool,
     /// 2 the asked-for volume/chapter itself, 1 a volume holding it, 0 the series.
     item_fit: u8,
@@ -235,6 +238,7 @@ async fn find(
             found.push(Found {
                 by_author: author_matches(&book.authors, &wanted.author),
                 book,
+                series: Some(series.clone()),
                 item_fit,
                 exact: candidate.exact,
                 score: candidate.score,
@@ -263,6 +267,7 @@ async fn find(
                         if fit > 0 {
                             found.push(Found {
                                 book: map_item(&item, None, &wanted.label),
+                                series: None,
                                 by_author: author_matches(&item.authors, &wanted.author),
                                 item_fit: fit,
                                 exact: true,
@@ -288,6 +293,23 @@ async fn find(
     if found.is_empty() {
         if let Some(err) = failure {
             return Err(err);
+        }
+    }
+    // A manga or webtoon whose novel of the same name came up too is tagged "(Manga)", so BookOrbit
+    // files the two apart.
+    let novels: HashSet<String> = found
+        .iter()
+        .filter_map(|f| f.series.as_ref())
+        .filter(|s| s.format == Format::Novel)
+        .map(|s| slugify(&s.name))
+        .collect();
+    for f in &mut found {
+        if let Some(series) = &f.series {
+            if let Some(tag) = edition_tag(series.format) {
+                if novels.contains(&slugify(&series.name)) {
+                    tag_edition(&mut f.book, tag);
+                }
+            }
         }
     }
     // The asked-for author first, then the asked-for volume or chapter itself, then a series named
@@ -462,14 +484,46 @@ async fn look_up(
                 },
                 None => None,
             };
-            Ok(map_item(&item, series.as_deref(), label))
+            let mut book = map_item(&item, series.as_deref(), label);
+            if let Some(series) = &series {
+                tag_if_novel_namesake(state, series, &mut book).await;
+            }
+            Ok(book)
         }
         Target::Series(id) => {
             // The series page only answers in full at its address with the slug.
             let catalog = state.store.get().await?;
             let slug = catalog.series_slug(id).ok_or(UpstreamError::NotFound)?;
             let series = state.pages.series(id, slug).await?;
-            Ok(map_series(&series, label))
+            let mut book = map_series(&series, label);
+            tag_if_novel_namesake(state, &series, &mut book).await;
+            Ok(book)
+        }
+    }
+}
+
+/// Tags a manga or webtoon "(Manga)" when the catalog holds a novel of the same name, as the search
+/// does, so a refresh by id keeps the tag. Another series with the same slug is read (its page is
+/// cached) to see whether it is the novel. A page that cannot be read leaves the record untagged.
+async fn tag_if_novel_namesake(state: &AppState, series: &SeriesPage, book: &mut BookMetadata) {
+    let Some(tag) = edition_tag(series.format) else {
+        return;
+    };
+    let Ok(catalog) = state.store.get().await else {
+        return;
+    };
+    let namesakes: Vec<(String, String)> = catalog
+        .series
+        .iter()
+        .filter(|e| e.slug == series.slug && e.id != series.id)
+        .map(|e| (e.id.clone(), e.slug.clone()))
+        .collect();
+    for (id, slug) in namesakes {
+        if let Ok(page) = state.pages.series(&id, &slug).await {
+            if page.format == Format::Novel {
+                tag_edition(book, tag);
+                return;
+            }
         }
     }
 }
@@ -759,8 +813,17 @@ mod tests {
         assert_eq!(code, 200);
         let first = &body["matches"][0];
         assert_eq!(first["providerId"], "c-3EW93XA7Z120_v51");
+        // BookWalker also sells the novel of this name, so the manga is told apart by name.
         assert_eq!(
             first["title"],
+            "Goblin Slayer Side Story: Year One (Manga) - Ch. 51"
+        );
+        assert_eq!(
+            first["series"][0]["series"],
+            "Goblin Slayer Side Story: Year One (Manga)"
+        );
+        assert_eq!(
+            first["displayTitle"],
             "Goblin Slayer Side Story: Year One - Ch. 51"
         );
         assert_eq!(first["mediaType"], "comic");
@@ -768,6 +831,11 @@ mod tests {
         // The novel of the same name comes after, as a series record.
         assert_eq!(body["matches"][1]["providerId"], "s-3K8N7ZS3PM40_v51");
         assert_eq!(body["matches"][1]["mediaType"], "book");
+        assert_eq!(
+            body["matches"][1]["title"],
+            "Goblin Slayer Side Story: Year One - Ch. 51"
+        );
+        assert!(body["matches"][1].get("displayTitle").is_none());
     }
 
     #[tokio::test]
@@ -824,7 +892,7 @@ mod tests {
             (
                 "c-3EW93XA7Z120_vol4v51",
                 "c-3EW93XA7Z120_vol4v51",
-                "Goblin Slayer Side Story: Year One - Vol. 4 Ch. 51",
+                "Goblin Slayer Side Story: Year One (Manga) - Vol. 4 Ch. 51",
                 "51",
             ),
             (

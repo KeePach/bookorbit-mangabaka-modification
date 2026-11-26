@@ -8,7 +8,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::label::{id_suffix, index_label, provider_index, ONESHOT_LABEL};
-use crate::pages::{ItemKind, ItemPage, SeriesPage};
+use crate::pages::{Format, ItemKind, ItemPage, SeriesPage};
 
 /// The spec's schema. Fields after the blank line are proposed extensions that a client which
 /// does not know them ignores.
@@ -42,6 +42,10 @@ pub struct BookMetadata {
     pub published_date: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub url: String,
+    /// What BookOrbit compares the search against, when it is not the title: the untagged title of
+    /// a record tagged "(Manga)".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub display_title: String,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -182,6 +186,7 @@ pub fn map_item(item: &ItemPage, series: Option<&SeriesPage>, label: &str) -> Bo
         } else {
             item.url.clone()
         },
+        display_title: String::new(),
     }
 }
 
@@ -207,7 +212,40 @@ pub fn map_series(series: &SeriesPage, label: &str) -> BookMetadata {
         language_code: "en".to_string(),
         published_date: String::new(),
         url: series.url.clone(),
+        display_title: String::new(),
     }
+}
+
+/// The word a comic is tagged with when BookWalker also sells a novel of the same name.
+pub fn edition_tag(format: Format) -> Option<&'static str> {
+    match format {
+        Format::Manga => Some("Manga"),
+        Format::Webtoon => Some("Webtoon"),
+        Format::Novel | Format::Audiobook | Format::Unknown => None,
+    }
+}
+
+/// Puts the edition after the series' name, in the series and in the title: "Mushoku Tensei:
+/// Jobless Reincarnation (Manga) - Vol. 3", so BookOrbit files the manga apart from the novel. It
+/// still compares the search against the untagged title, sent as the display title, so the tag
+/// changes no match. A name that already ends in such a word is left as it is.
+pub fn tag_edition(book: &mut BookMetadata, tag: &str) {
+    let Some(entry) = book.series.first_mut() else {
+        return;
+    };
+    let name = entry.series.clone();
+    let last = crate::label::title_words(&name).pop().unwrap_or_default();
+    if ["manga", "manhwa", "manhua", "comic", "comics", "webtoon"].contains(&last.as_str()) {
+        return;
+    }
+    let tagged = format!("{name} ({tag})");
+    if book.display_title.is_empty() {
+        book.display_title = book.title.clone();
+    }
+    if let Some(rest) = book.title.strip_prefix(name.as_str()) {
+        book.title = format!("{tagged}{rest}");
+    }
+    entry.series = tagged;
 }
 
 #[cfg(test)]

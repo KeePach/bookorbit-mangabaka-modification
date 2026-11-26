@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const VERSION: &str = "0.1.6";
+pub const VERSION: &str = "0.1.7";
 
 pub struct Config {
     pub auth_token: Option<String>,
