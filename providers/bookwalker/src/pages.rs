@@ -51,9 +51,9 @@ impl Format {
     fn parse(word: &str) -> Self {
         match word.trim().to_ascii_lowercase().as_str() {
             "manga" => Self::Manga,
-            "novel" => Self::Novel,
-            "webtoon" => Self::Webtoon,
-            "audiobook" => Self::Audiobook,
+            "novel" | "novels" => Self::Novel,
+            "webtoon" | "webtoons" => Self::Webtoon,
+            "audiobook" | "audiobooks" => Self::Audiobook,
             _ => Self::Unknown,
         }
     }
@@ -332,23 +332,33 @@ fn details(html: &str) -> Vec<Detail> {
         .collect()
 }
 
-/// Story credits first, then the art: "AUTHOR", "STORY", "ARTIST", "ILLUSTRATOR". Translators,
-/// letterers and editors are left out.
+/// Story credits first, then the art. An adaptation names its writer in several ways ("ORIGINAL
+/// AUTHOR" Chugong on the Solo Leveling manhwa, "TEXT" FUSE on the Slime manga, "CREATOR"); left
+/// out, the manga would lose the author a file names and the novel would win the match.
+/// Translators, letterers, editors and plain contributors are left out.
+const STORY_ROLES: &[&str] = &[
+    "AUTHOR",
+    "ORIGINAL AUTHOR",
+    "CREATOR",
+    "ORIGINAL CREATOR",
+    "TEXT",
+    "STORY",
+    "ORIGINAL STORY",
+    "ORIGINAL WORK",
+    "WRITER",
+    "SCRIPT",
+];
+const ART_ROLES: &[&str] = &["ARTIST", "ART", "ILLUSTRATOR", "ILLUSTRATIONS"];
+
 fn people(details: &[Detail]) -> Vec<String> {
     let mut seen = HashSet::new();
-    [
-        "AUTHOR",
-        "STORY",
-        "ORIGINAL STORY",
-        "ARTIST",
-        "ART",
-        "ILLUSTRATOR",
-    ]
-    .iter()
-    .flat_map(|role| details.iter().filter(move |row| row.label == *role))
-    .flat_map(|row| row.values.iter().cloned())
-    .filter(|name| seen.insert(name.to_lowercase()))
-    .collect()
+    STORY_ROLES
+        .iter()
+        .chain(ART_ROLES)
+        .flat_map(|role| details.iter().filter(move |row| row.label == *role))
+        .flat_map(|row| row.values.iter().cloned())
+        .filter(|name| seen.insert(name.to_lowercase()))
+        .collect()
 }
 
 fn ld_people(value: Option<&Value>) -> Vec<String> {
@@ -549,6 +559,26 @@ mod tests {
         assert!(page
             .description
             .contains("Read the next chapter of Goblin Slayer"));
+    }
+
+    #[test]
+    fn an_adaptation_keeps_its_original_writer() {
+        // Without these, a file naming the novelist matches only the novel.
+        let solo = parse_item(
+            ItemKind::Volume,
+            "3D19GEXJZFZG",
+            include_str!("../testdata/volume-solo-leveling-manhwa-3.html"),
+        )
+        .unwrap();
+        assert_eq!(solo.authors, ["Chugong", "DUBU(REDICE DUBU(REDICE STUDIO)"]);
+        let slime = parse_item(
+            ItemKind::Volume,
+            "1657FWPXKTEG",
+            include_str!("../testdata/volume-slime-manga-5.html"),
+        )
+        .unwrap();
+        assert_eq!(slime.authors, ["FUSE", "Taiki Kawakami"]);
+        assert_eq!(slime.format, Format::Manga);
     }
 
     #[test]
