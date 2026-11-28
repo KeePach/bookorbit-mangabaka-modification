@@ -151,3 +151,85 @@ have done the job too; Rust does it in less.
 
 The Rust build was later switched to optimise for size (`opt-level = "z"`, regex without its
 speed-up engines), which took the image to 2.8 MB; the figures above are from the earlier build.
+
+---
+
+## About this fork
+
+This MangaBaka provider is part of a personal fork (KeePach/bookorbit-mangabaka-modification),
+made to work with the BookOrbit fork [KeePach/bookorbit](https://github.com/KeePach/bookorbit).
+
+> [!WARNING]
+> **The changes in this fork were vibecoded.** They were written with an AI coding assistant
+> (Claude), directed and tested by the fork's owner on one home server. They were not reviewed by
+> the authors of the official MangaBaka provider or by the BookOrbit maintainers.
+>
+> **Everything in this fork is provided "as is", without warranty of any kind, and no support is
+> offered or expected.** It may break, change or disappear at any time, including when MangaBaka
+> changes its API. Use it at your own risk. Issues and requests about it may go unanswered, and
+> they must not be reported to the official MangaBaka provider, to MangaBaka, or to the upstream
+> BookOrbit project.
+
+### What the BookOrbit fork needs from this provider
+
+The BookOrbit fork's MangaBaka features read the ids this provider writes, so they need this
+provider rather than the official one:
+
+- **MangaBaka reading sync** (BookOrbit fork) reads the chapter and volume of each book from its
+  id. Without these ids it has no chapter or volume to send.
+- **MangaBaka licensing check** (BookOrbit fork) matches a series by the MangaBaka id on its books
+  first, and falls back to matching by title.
+- **Edition tags** and **`displayTitle`** are produced here, and the BookOrbit fork reads
+  `displayTitle` so a romanized or native file name still matches the English series.
+
+The ids, as written now (this replaces the older `1692v3` example in Mapping above):
+
+| Id | Means |
+|---|---|
+| `1692` | the series only |
+| `1692v11` | chapter 11 (`v` alone is a chapter) |
+| `1692vol3` | volume 3 |
+| `1692vol2v11` | volume 2, chapter 11 |
+| `1692os` | a oneshot |
+| `1692vol9-10`, `1692v0-6` | a range of volumes or chapters |
+| `1692v10.5` | a decimal chapter |
+
+### Setup with the BookOrbit fork
+
+In BookOrbit's `docker-compose.yml` (or a `docker-compose.override.yml` next to it):
+
+```yaml
+services:
+  mangabaka:
+    container_name: bookorbit-mangabaka
+    build:
+      context: https://github.com/KeePach/bookorbit-mangabaka-modification.git#main:providers/mangabaka
+      dockerfile: Dockerfile
+    image: mangabaka-provider:local
+    restart: unless-stopped
+    # Optional: publish a port so a browser can open the "open on MangaBaka" links.
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      # All optional, shown with their defaults where they have one.
+      PUBLIC_URL: http://localhost:8081   # where a browser reaches this provider, for book links
+      # AUTH_TOKEN: change-me             # then set the same Authorization header in BookOrbit
+      # SEARCH_INTERVAL_MS: "2000"
+      # LOOKUP_INTERVAL_MS: "340"
+      # MANGABAKA_API: https://api.mangabaka.org
+```
+
+Then:
+
+1. `docker compose up -d --build mangabaka`
+2. In BookOrbit, **Settings > Metadata > Providers**, add an external provider with the URL
+   `http://mangabaka:8080` and press **Test**.
+3. Fetch metadata for your manga from MangaBaka, so the books get their ids. Books matched with
+   an older version of this provider keep their old ids until they are fetched again.
+
+Builds from a Git URL are cached. After this provider changes, rebuild without the cache:
+
+```bash
+docker compose build --no-cache mangabaka
+docker compose up -d mangabaka
+```
